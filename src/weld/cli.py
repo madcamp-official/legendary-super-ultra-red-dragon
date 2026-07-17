@@ -1,0 +1,113 @@
+"""공용 진입점 — 파이프라인을 각 모듈에서 가져와 연결만 한다.
+
+이 파일은 오케스트레이션 전용이다. 실제 로직은 각 모듈(classify/candidates/
+verify/policy/escalate)에 있으므로, 자기 파트를 채울 때는 보통 이 파일을
+건드릴 필요가 없다. 새 파이프라인 단계를 추가할 때만 팀 전체와 상의 후 수정한다.
+"""
+
+from __future__ import annotations
+
+import configparser
+import subprocess
+import sys
+from pathlib import Path
+
+import click
+
+from weld.candidates.generate import generate_candidates
+from weld.candidates.summarize import summarize_intent
+from weld.classify.mergiraf import classify_conflict
+from weld.escalate.report import build_escalation_report
+from weld.policy.trust import decide
+from weld.types import EscalationReport
+from weld.verify.impact import select_relevant_tests
+from weld.verify.mutation import compute_mutation_score
+from weld.verify.sandbox import run_candidates_parallel
+
+MERGE_DRIVER_NAME = "weld"
+
+
+@click.group()
+def main() -> None:
+    """Weld — 검증되지 않은 병합은 자동으로 착지하지 못하게 막는 안전장치."""
+
+
+@main.command()
+@click.argument("base_file")
+@click.argument("ours_file")
+@click.argument("theirs_file")
+def merge(base_file: str, ours_file: str, theirs_file: str) -> None:
+    """git merge driver 진입점: `weld merge %O %A %B`.
+
+    exit 0 → git이 자동 커밋. exit 1 → git이 기존 충돌 마커를 남기고
+    사람에게 폴백(지금과 동일한 경험).
+    """
+    base = Path(base_file).read_text()
+    ours = Path(ours_file).read_text()
+    theirs = Path(theirs_file).read_text()
+
+    classification = classify_conflict(base, ours, theirs)
+    if classification.is_spurious:
+        Path(ours_file).write_text(classification.resolved_content or "")
+        sys.exit(0)
+
+    candidates = generate_candidates(base, ours, theirs)
+    changed_files = [ours_file]
+    relevant_tests = select_relevant_tests(changed_files, repo_path=".")
+    verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
+    mutation_scores = [
+        compute_mutation_score(c, relevant_tests, repo_path=".") for c in candidates
+    ]
+
+    for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
+        decision = decide(verification, mutation)
+        if decision.accepted:
+            Path(ours_file).write_text(candidate.content)
+            sys.exit(0)
+
+    intent_summary = summarize_intent(base, ours, theirs)
+    report = EscalationReport(
+        intent_summary=intent_summary,
+        candidates=candidates,
+        verifications=verifications,
+        mutation_scores=mutation_scores,
+    )
+    click.echo(build_escalation_report(report), err=True)
+    sys.exit(1)
+
+
+@main.command()
+def install() -> None:
+    """현재 저장소에 weld를 git merge driver로 등록한다."""
+    repo_root = Path(
+        subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    )
+
+    config = configparser.ConfigParser()
+    git_config_path = repo_root / ".git" / "config"
+    config.read(git_config_path)
+    section = f'merge "{MERGE_DRIVER_NAME}"'
+    if section not in config:
+        config[section] = {}
+    config[section]["name"] = "Weld verified merge driver"
+    config[section]["driver"] = f"{MERGE_DRIVER_NAME} merge %O %A %B"
+    with git_config_path.open("w") as f:
+        config.write(f)
+
+    gitattributes_path = repo_root / ".gitattributes"
+    line = f"* merge={MERGE_DRIVER_NAME}\n"
+    existing = gitattributes_path.read_text() if gitattributes_path.exists() else ""
+    if line not in existing:
+        with gitattributes_path.open("a") as f:
+            f.write(line)
+
+    click.echo("weld merge driver installed.")
+
+
+if __name__ == "__main__":
+    main()
