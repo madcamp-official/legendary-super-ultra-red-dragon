@@ -154,13 +154,92 @@ def scenario_real(root: Path) -> None:
     _print_file(root, "money.py")
 
 
+def _setup_value_conflict_repo(root: Path, test_body: str) -> subprocess.CompletedProcess:
+    """값 충돌(같은 줄, 다른 값) + 그 값을 검증하는 테스트가 있는 저장소를 만들고
+    git merge까지 실행한다. base=3000, A(feature)=4000, B(main)=5000.
+
+    값 충돌이라 generate가 LLM을 안 부르고 ours/theirs를 그대로 후보로 낸다
+    (GEMINI_API_KEY 불필요). 어느 값이 맞는지는 test_body가 결정한다.
+    """
+    _init_repo(root)
+    (root / "conftest.py").write_text(
+        "import os, sys\nsys.path.insert(0, os.path.dirname(__file__))\n"
+    )
+    (root / "pricing.py").write_text("def shipping_fee():\n    return 3000\n")
+    (root / "test_pricing.py").write_text(
+        "from pricing import shipping_fee\n\n\ndef test_shipping_fee():\n" + test_body
+    )
+    _commit_all(root, "base + test")
+    _install_weld(root)
+    _commit_all(root, "weld 설치")
+    base_branch = _git(["branch", "--show-current"], root).stdout.strip()
+
+    _git(["checkout", "-q", "-b", "feature"], root)
+    (root / "pricing.py").write_text("def shipping_fee():\n    return 4000\n")
+    _commit_all(root, "A: 배송비 4000")
+
+    _git(["checkout", "-q", base_branch], root)
+    (root / "pricing.py").write_text("def shipping_fee():\n    return 5000\n")
+    _commit_all(root, "B: 배송비 5000")
+
+    return _git(["merge", "feature", "-m", "merge feature"], root)
+
+
+def scenario_value_automerge(root: Path) -> None:
+    """값 충돌 + 테스트가 정답 값을 못 박음 → 검증이 옳은 후보를 골라 자동 병합."""
+    print("\n" + "=" * 60)
+    print("시나리오 ③ 값 충돌 + 엄격한 테스트 → 자동 병합 (해피패스)")
+    print("=" * 60)
+    print("  base: shipping_fee() = 3000,  A=4000,  B=5000")
+    print("  테스트: assert shipping_fee() == 5000  (정답을 못 박음)")
+    print("  → 5000은 통과, 4000은 실패 → Weld가 5000을 자동 병합해야 함")
+
+    result = _setup_value_conflict_repo(root, "    assert shipping_fee() == 5000\n")
+    print(f"\n  git merge 종료코드: {result.returncode}")
+    merged = (root / "pricing.py").read_text()
+    if result.returncode == 0 and "5000" in merged and not _has_conflict_markers(root, "pricing.py"):
+        print("  ✅ Weld가 검증 통과한 5000을 자동 병합했다 (진짜 충돌 해피패스!).")
+    elif _has_conflict_markers(root, "pricing.py"):
+        print("  🟡 아직 impact.py(재준형)가 stub라 검증 단계 전에 폴백됨.")
+        print("     impact.py 들어오면 여기서 5000 자동 병합으로 동작한다.")
+    else:
+        print("  ⚠️ 예상 밖 상태.")
+    _print_file(root, "pricing.py")
+
+
+def scenario_value_escalate(root: Path) -> None:
+    """값 충돌 + 테스트가 값을 전혀 제약 안 함 → 판정 불가 → 정직하게 사람에게."""
+    print("\n" + "=" * 60)
+    print("시나리오 ④ 값 충돌 + 느슨한 테스트 → 에스컬레이션 (정직한 폴백)")
+    print("=" * 60)
+    print("  base: shipping_fee() = 3000,  A=4000,  B=5000")
+    print("  테스트: assert isinstance(shipping_fee(), int)  (값을 제약 안 함)")
+    print("  → 4000도 5000도 통과, 뮤테이션도 못 잡음 → 사람에게 넘겨야 함")
+
+    result = _setup_value_conflict_repo(root, "    assert isinstance(shipping_fee(), int)\n")
+    print(f"\n  git merge 종료코드: {result.returncode}")
+    if _has_conflict_markers(root, "pricing.py"):
+        print("  🟡 사람에게 폴백 — 표준 충돌 마커를 남김.")
+        print("     (테스트가 값을 못 박으니 자동 판정 불가 → 이게 올바른 동작.")
+        print("      impact.py 들어와도 여기선 뮤테이션 점수 미달로 에스컬레이션한다.)")
+    elif result.returncode == 0:
+        print("  ⚠️ 자동 병합됨 — 느슨한 테스트인데 병합했다면 판정 로직 점검 필요.")
+    _print_file(root, "pricing.py")
+
+
 def main() -> int:
     if shutil.which("weld") is None:
         print("`weld` 명령을 PATH에서 못 찾았습니다. 먼저 `pip install -e .`를 실행하세요.")
         return 1
 
     print("Weld end-to-end 데모 — 진짜 git 저장소에서 실제 merge 실행")
-    for scenario in (scenario_spurious, scenario_real):
+    scenarios = (
+        scenario_spurious,
+        scenario_real,
+        scenario_value_automerge,
+        scenario_value_escalate,
+    )
+    for scenario in scenarios:
         with tempfile.TemporaryDirectory(prefix="weld-demo-") as tmp:
             scenario(Path(tmp))
     print("\n데모 끝.")
