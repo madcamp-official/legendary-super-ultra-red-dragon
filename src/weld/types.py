@@ -34,6 +34,11 @@ class MergeCandidate:
 
     id: str
     content: str
+    """병합이 적용된 **파일 하나의 완전한 최종 내용(파일 전체)**. 바뀐 부분만
+    담은 스니펫이 아니다 — cli.py는 이걸 그대로 파일에 덮어쓰고, mutation.py는
+    ast.parse로 통째로 파싱하므로, 일부만 담으면 파일이 깨지거나 파싱이 실패한다.
+    generate.py에서 LLM으로 후보를 만들 때 "바뀐 줄만" 반환하지 말고 반드시
+    병합 결과 파일 전체를 담을 것."""
     strategy: str = "llm"
     """후보를 만든 전략 이름 (예: "llm-conservative", "llm-aggressive")."""
     file_path: str = ""
