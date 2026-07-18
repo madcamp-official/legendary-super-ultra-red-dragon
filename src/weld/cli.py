@@ -45,44 +45,71 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
     임시 파일이라, 후보를 검증/뮤테이션 테스트할 때 어디에 써야 할지는
     %P로만 알 수 있다.
 
-    exit 0 → git이 자동 커밋. exit 1 → git이 기존 충돌 마커를 남기고
-    사람에게 폴백(지금과 동일한 경험).
+    exit 0 → git이 자동 커밋. exit 1 → 표준 충돌 마커를 남기고 사람에게
+    폴백(지금과 동일한 경험) — 검증할 후보가 없어서든, 파이프라인 자체가
+    (아직 미완성인 다른 모듈 때문에) 예외로 죽어서든 마찬가지다. git이
+    알아서 마커를 남겨주지 않으므로(커스텀 merge driver는 %A를 그대로
+    working tree에 되돌려 쓸 뿐) 여기서 직접 쓴다 — 안 그러면 사람이
+    아무 표시 없는 "ours" 버전만 보고 충돌을 못 알아챌 수 있다.
     """
     base = Path(base_file).read_text()
     ours = Path(ours_file).read_text()
     theirs = Path(theirs_file).read_text()
 
-    classification = classify_conflict(base, ours, theirs)
-    if classification.is_spurious:
-        Path(ours_file).write_text(classification.resolved_content or "")
-        sys.exit(0)
-
-    candidates = [
-        dataclasses.replace(c, file_path=path) for c in generate_candidates(base, ours, theirs)
-    ]
-    changed_files = [path]
-    relevant_tests = select_relevant_tests(changed_files, repo_path=".")
-    verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
-    mutation_scores = [
-        compute_mutation_score(c, relevant_tests, repo_path=".", base_content=base)
-        for c in candidates
-    ]
-
-    for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
-        decision = decide(verification, mutation)
-        if decision.accepted:
-            Path(ours_file).write_text(candidate.content)
+    try:
+        classification = classify_conflict(base, ours, theirs)
+        if classification.is_spurious:
+            Path(ours_file).write_text(classification.resolved_content or "")
             sys.exit(0)
 
-    intent_summary = summarize_intent(base, ours, theirs)
-    report = EscalationReport(
-        intent_summary=intent_summary,
-        candidates=candidates,
-        verifications=verifications,
-        mutation_scores=mutation_scores,
-    )
-    click.echo(build_escalation_report(report), err=True)
+        candidates = [
+            dataclasses.replace(c, file_path=path)
+            for c in generate_candidates(base, ours, theirs)
+        ]
+        changed_files = [path]
+        relevant_tests = select_relevant_tests(changed_files, repo_path=".")
+        verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
+        mutation_scores = [
+            compute_mutation_score(c, relevant_tests, repo_path=".", base_content=base)
+            for c in candidates
+        ]
+
+        for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
+            decision = decide(verification, mutation)
+            if decision.accepted:
+                Path(ours_file).write_text(candidate.content)
+                sys.exit(0)
+
+        intent_summary = summarize_intent(base, ours, theirs)
+        report = EscalationReport(
+            intent_summary=intent_summary,
+            candidates=candidates,
+            verifications=verifications,
+            mutation_scores=mutation_scores,
+        )
+        click.echo(build_escalation_report(report), err=True)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 사람에게 안전하게 폴백해야 함
+        click.echo(f"weld: 검증 파이프라인이 실패해서 사람에게 폴백함: {exc}", err=True)
+
+    _write_conflict_markers(ours_file, base, ours, theirs)
     sys.exit(1)
+
+
+def _write_conflict_markers(ours_file: str, base: str, ours: str, theirs: str) -> None:
+    """검증 통과한 후보가 없거나 파이프라인이 실패했을 때, git 기본 병합과
+    똑같이 익숙한 충돌 마커를 파일에 남긴다."""
+    marked = (
+        "<<<<<<< ours\n"
+        f"{ours}"
+        "||||||| base\n"
+        f"{base}"
+        "=======\n"
+        f"{theirs}"
+        ">>>>>>> theirs\n"
+    )
+    Path(ours_file).write_text(marked)
 
 
 @main.command()
@@ -97,7 +124,9 @@ def install() -> None:
         ).stdout.strip()
     )
 
-    config = configparser.ConfigParser()
+    # interpolation=None 필수: driver 값 안의 %O %A %B %P는 git이 해석할
+    # 플레이스홀더라 configparser의 기본 %-보간 문법과 충돌해서 크래시한다.
+    config = configparser.ConfigParser(interpolation=None)
     git_config_path = repo_root / ".git" / "config"
     config.read(git_config_path)
     section = f'merge "{MERGE_DRIVER_NAME}"'
