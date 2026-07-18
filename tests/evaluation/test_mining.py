@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import subprocess
 
-from weld.evaluation.mining import mine_conflicts
+from weld.evaluation.mining import _is_two_sided_conflict, mine_conflicts
 
 
 def _git(repo, *args):
@@ -59,3 +59,14 @@ def test_mine_conflicts_extracts_base_ours_theirs_resolution(tmp_path):
 def test_mine_conflicts_respects_max_cases(tmp_path):
     repo = _make_conflicting_repo(tmp_path)
     assert mine_conflicts(str(repo), max_cases=0) == []
+
+
+def test_is_two_sided_conflict_filters_one_sided_changes():
+    # 양쪽 다 base와 다름 → 진짜 충돌
+    assert _is_two_sided_conflict("v1", "v2", "v3") is True
+    # ours가 base와 같음(ours 쪽은 안 바뀜) → 가짜
+    assert _is_two_sided_conflict("v1", "v1", "v3") is False
+    # theirs가 base와 같음 → 가짜
+    assert _is_two_sided_conflict("v1", "v2", "v1") is False
+    # base 없음(양쪽에서 새로 추가) → 진짜 충돌로 취급
+    assert _is_two_sided_conflict(None, "v2", "v3") is True

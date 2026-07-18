@@ -56,6 +56,19 @@ def _conflicted_paths(repo_path: str, p1: str, p2: str) -> list[str]:
     return paths
 
 
+def _is_two_sided_conflict(base: str | None, ours: str, theirs: str) -> bool:
+    """양쪽(ours/theirs)이 모두 base와 다른 진짜 충돌인지.
+
+    한쪽이라도 base와 같으면 그쪽은 안 바뀐 것 → 진짜 두 갈래 충돌이 아니다
+    (git이라면 바뀐 쪽으로 그냥 병합됨). merge-tree가 rename 등 다른 이유로
+    충돌 표시한 경우를 걸러 평가셋 오염을 막는다. base가 None이면 양쪽에서 새로
+    추가된 파일(add/add)이라 진짜 충돌로 본다.
+    """
+    if base is None:
+        return True
+    return base != ours and base != theirs
+
+
 def mine_conflicts(
     repo_path: str, *, max_cases: int | None = None, python_only: bool = True
 ) -> list[EvalCase]:
@@ -72,6 +85,7 @@ def mine_conflicts(
         if len(parents) != 2:
             continue  # octopus 병합 등은 건너뜀
         p1, p2 = parents
+        base_ref = _git(repo_path, ["merge-base", p1, p2]).stdout.strip()
 
         for path in _conflicted_paths(repo_path, p1, p2):
             if max_cases is not None and len(cases) >= max_cases:
@@ -84,8 +98,10 @@ def mine_conflicts(
             if ours is None or theirs is None:
                 continue  # 한쪽에서 삭제/이동된 경우 — 값 대조가 애매하니 제외
 
-            base_ref = _git(repo_path, ["merge-base", p1, p2]).stdout.strip()
             base = _file_at(repo_path, base_ref, path) if base_ref else None
+            if not _is_two_sided_conflict(base, ours, theirs):
+                continue  # 한쪽만 바뀐 가짜 충돌 — 평가셋 오염 방지
+
             resolution = _file_at(repo_path, merge, path)
 
             cases.append(
