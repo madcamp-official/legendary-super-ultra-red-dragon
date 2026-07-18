@@ -20,6 +20,11 @@ pytest
 ruff check src tests
 ```
 
+> 로컬 경로에 한글 폴더명(예: `몰입캠프`)이 껴 있으면 pip editable install의
+> 유니코드 정규화(NFC/NFD) 문제로 `ModuleNotFoundError: No module named 'weld'`가
+> 간헐적으로 뜰 수 있다. 이럴 땐 `PYTHONPATH=src pytest`처럼 `PYTHONPATH=src`를
+> 붙여서 우회한다.
+
 ## 구조 & 담당
 
 파일이 겹치지 않도록 모듈별로 담당을 나눴다. **다른 사람의 파일은 인터페이스
@@ -30,16 +35,16 @@ ruff check src tests
 src/weld/
 ├── cli.py                 # 오케스트레이션만, 파이프라인 배선 (건드릴 일 거의 없음)
 ├── types.py                # 공용 데이터 계약 — 수정 시 팀 합의 필요
-├── classify/mergiraf.py    # [팀원A] 가짜/진짜 충돌 분류 (Mergiraf 연동)
+├── classify/mergiraf.py    # [김민재] 가짜/진짜 충돌 분류 (Mergiraf 연동)
 ├── candidates/
-│   ├── generate.py         # [나] LLM 병합 후보 생성
-│   └── summarize.py        # [나] 에스컬레이션용 의도 요약
+│   ├── generate.py         # [이서영] LLM 병합 후보 생성
+│   └── summarize.py        # [이서영] 에스컬레이션용 의도 요약
 ├── verify/
-│   ├── sandbox.py          # [팀원B] 격리 샌드박스, 병렬 검증
-│   ├── impact.py           # [팀원B] 테스트 영향 분석(선별 실행)
-│   └── mutation.py         # [팀원A] 뮤테이션 테스팅-라이트 (핵심 기여)
-├── policy/trust.py         # [나] 검증+뮤테이션 결과 종합 → 채택/에스컬레이션
-└── escalate/report.py      # [나] 실패 시 사람에게 줄 리포트
+│   ├── sandbox.py          # [이재준] 격리 샌드박스, 병렬 검증
+│   ├── impact.py           # [이재준] 테스트 영향 분석(선별 실행)
+│   └── mutation.py         # [김민재] 뮤테이션 테스팅-라이트 (핵심 기여)
+├── policy/trust.py         # [이서영] 검증+뮤테이션 결과 종합 → 채택/에스컬레이션
+└── escalate/report.py      # [이서영] 실패 시 사람에게 줄 리포트
 ```
 
 `tests/`는 `src/weld/`와 같은 구조로 미러링돼 있다 — 자기 모듈의 테스트는
