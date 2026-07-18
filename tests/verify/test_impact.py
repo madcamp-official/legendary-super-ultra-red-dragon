@@ -74,3 +74,18 @@ def test_select_relevant_tests_empty_changed_files_returns_empty(tmp_path):
     _build_sample_repo(tmp_path)
 
     assert select_relevant_tests([], repo_path=str(tmp_path)) == []
+
+
+def test_select_relevant_tests_falls_back_to_whole_file_when_ast_finds_none(tmp_path):
+    _write(tmp_path, "src/weld/dynamic.py", "def dynamic():\n    return 1\n")
+    _write(
+        tmp_path,
+        "tests/test_dynamic.py",
+        "from weld.dynamic import dynamic\n\n\n"
+        "def _make_test():\n    assert dynamic() == 1\n\n\n"
+        "globals()['test_generated'] = _make_test\n",
+    )
+
+    result = select_relevant_tests(["src/weld/dynamic.py"], repo_path=str(tmp_path))
+
+    assert result == ["tests/test_dynamic.py"]

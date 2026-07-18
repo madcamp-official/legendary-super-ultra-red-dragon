@@ -191,4 +191,11 @@ def select_relevant_tests(changed_files: list[str], repo_path: str) -> list[Test
     node_ids: list[TestId] = []
     for test_file in test_files:
         node_ids.extend(_test_node_ids(repo_root, test_file))
+
+    if not node_ids and test_files:
+        # ast로 개별 테스트 함수를 못 뽑아낸 경우(예: parametrize, 동적 정의) —
+        # 좁히길 포기하고 관련 테스트 파일 전체를 pytest 노드ID로 돌린다.
+        # 파일 경로 자체도 유효한 pytest 노드ID라 그대로 넘기면 파일 전체가 돈다.
+        return test_files
+
     return node_ids
