@@ -13,6 +13,23 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
+### mergiraf 설치 (필수)
+
+가짜/진짜 충돌 분류는 외부 도구 `mergiraf`(tree-sitter 기반 구조적 병합)를
+호출한다. **이게 PATH에 없으면 모든 충돌이 "진짜 충돌"로 fail-safe되어
+가짜 충돌 자동 처리 기능이 통째로 무효화된다** — 그러니 각자 로컬에 꼭 깔 것.
+
+```bash
+# macOS
+brew install mergiraf
+
+# cargo (그 외 플랫폼)
+cargo install mergiraf
+```
+
+설치 확인: `mergiraf --version`. 다른 경로에 설치했다면 환경변수
+`WELD_MERGIRAF_BIN`으로 실행 파일 경로를 지정할 수 있다.
+
 ## 테스트
 
 ```bash
