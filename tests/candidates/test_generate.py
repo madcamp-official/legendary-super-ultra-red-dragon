@@ -3,7 +3,11 @@ from unittest.mock import patch
 
 import pytest
 
-from weld.candidates.generate import generate_candidates, is_value_conflict
+from weld.candidates.generate import (
+    _normalize_hunk_output,
+    generate_candidates,
+    is_value_conflict,
+)
 
 
 def _patch_llm(**kwargs):
@@ -38,6 +42,36 @@ def test_is_value_conflict_false_when_only_one_side_changed():
     assert is_value_conflict(base="a\n", ours="b\n", theirs="a\n") is False
 
 
+# --- _normalize_hunk_output ------------------------------------------------
+
+
+def test_normalize_hunk_output_adds_missing_leading_indent():
+    hunk = ("    log(name)\n    return 1\n", "    return name\n", "    return 2\n")
+    resolved = 'log(name)\n    return f"Hello, {name}!"\n'
+    normalized = _normalize_hunk_output(resolved, hunk)
+    assert normalized == 'log(name)\n    return f"Hello, {name}!"\n'.replace(
+        "log(name)", "    log(name)", 1
+    )
+
+
+def test_normalize_hunk_output_leaves_correct_indent_alone():
+    hunk = ("    x = 1\n", "    x = 0\n", "    x = 2\n")
+    resolved = "    x = 3\n"
+    assert _normalize_hunk_output(resolved, hunk) == "    x = 3\n"
+
+
+def test_normalize_hunk_output_appends_missing_trailing_newline():
+    hunk = ("    a\n", "    b\n", "    c\n")
+    resolved = "    d"  # 끝 개행 없음
+    assert _normalize_hunk_output(resolved, hunk) == "    d\n"
+
+
+def test_normalize_hunk_output_noop_when_reference_has_no_indent():
+    hunk = ("a\n", "b\n", "c\n")
+    resolved = "d\n"
+    assert _normalize_hunk_output(resolved, hunk) == "d\n"
+
+
 # --- generate_candidates: 값 충돌 경로 (LLM 호출 없음) ----------------------
 
 
@@ -56,93 +90,131 @@ def test_generate_candidates_value_conflict_returns_verbatim_without_llm():
     assert next(c for c in candidates if c.strategy == "theirs-verbatim").content == theirs
 
 
-# --- generate_candidates: 구조적 충돌 경로 (LLM 목 호출) --------------------
+# --- generate_candidates: diff3가 이미 완전히 합쳐버리는 경우 (LLM 호출 없음) ---
+
+
+def test_generate_candidates_non_overlapping_change_skips_llm():
+    """서로 다른 위치를 건드린 구조적 변경은 git의 텍스트 3-way 병합만으로 이미
+    충돌 없이 합쳐진다 — mergiraf가 뭔가를 놓쳐도 여기서 한 번 더 LLM 호출을
+    아낄 수 있는 안전망."""
+    base = "def add(a, b):\n    return a + b\n\n\ndef multiply(a, b):\n    return a * b\n"
+    ours = (
+        "def add(a, b):\n"
+        '    print("adding")\n'
+        "    return a + b\n\n\n"
+        "def multiply(a, b):\n    return a * b\n"
+    )
+    theirs = base + "\n\ndef subtract(a, b):\n    return a - b\n"
+
+    with patch("weld.candidates.generate._call_llm") as mock_call:
+        candidates = generate_candidates(base, ours, theirs)
+
+    mock_call.assert_not_called()
+    assert len(candidates) == 1
+    assert candidates[0].strategy == "diff3-verbatim"
+    assert "print" in candidates[0].content
+    assert "def subtract" in candidates[0].content
+
+
+# --- generate_candidates: 구조적 충돌 경로 (훙크 단위 LLM 목 호출) -----------
+
+
+def _multiline_conflict():
+    # 줄 수가 다르므로 is_value_conflict는 False — diff3 경로로 간다.
+    base = "a\nb\nc\n"
+    ours = "a\nOURS_LINE\nc\nEXTRA\n"
+    theirs = "a\nTHEIRS_LINE\nc\n"
+    return base, ours, theirs
 
 
 def test_generate_candidates_returns_requested_count():
-    build, call = _patch_llm(return_value="merged")
+    build, call = _patch_llm(return_value="merged\n")
     with build, call:
-        candidates = generate_candidates(base="", ours="a", theirs="b", n=2)
+        candidates = generate_candidates(*_multiline_conflict(), n=2)
     assert len(candidates) == 2
 
 
-def test_generate_candidates_default_covers_three_strategies():
-    build, call = _patch_llm(return_value="merged")
-    with build, call:
-        candidates = generate_candidates(base="", ours="a", theirs="b")
-    strategies = {c.strategy for c in candidates}
-    assert strategies == {"llm-primary", "llm-alternative-1", "llm-alternative-2"}
-
-
-def test_generate_candidates_alternative_prompts_reference_previous_candidates():
-    prompts: list[str] = []
-
-    def fake_call(client, prompt):
-        prompts.append(prompt)
-        return f"merged-{len(prompts)}"
-
-    build, call = _patch_llm(side_effect=fake_call)
-    with build, call:
-        generate_candidates(base="", ours="a", theirs="b", n=3)
-
-    assert "기존 병합안" not in prompts[0]
-    assert "merged-1" in prompts[1]
-    assert "merged-1" in prompts[2]
-    assert "merged-2" in prompts[2]
-
-
 def test_generate_candidates_ids_are_unique():
-    build, call = _patch_llm(return_value="merged")
+    build, call = _patch_llm(return_value="merged\n")
     with build, call:
-        candidates = generate_candidates(base="", ours="a", theirs="b")
+        candidates = generate_candidates(*_multiline_conflict())
     ids = [c.id for c in candidates]
     assert len(ids) == len(set(ids))
 
 
-def test_generate_candidates_uses_llm_output_as_content():
-    build, call = _patch_llm(return_value="resolved content")
+def test_generate_candidates_strategies_carry_distinct_temperatures():
+    build, call = _patch_llm(return_value="merged\n")
     with build, call:
-        candidates = generate_candidates(base="", ours="a", theirs="b", n=1)
-    assert candidates[0].content == "resolved content"
+        candidates = generate_candidates(*_multiline_conflict(), n=3)
+    strategies = {c.strategy for c in candidates}
+    assert len(strategies) == 3
+    assert all(s.startswith("llm-hunk-t") for s in strategies)
 
 
-def test_generate_candidates_prompt_includes_both_sides():
-    captured: list[str] = []
+def test_generate_candidates_splices_hunk_resolution_into_surrounding_text():
+    build, call = _patch_llm(return_value="RESOLVED\n")
+    with build, call:
+        candidates = generate_candidates(*_multiline_conflict(), n=1)
+    # 충돌 안 난 앞/뒤 줄(a, c)은 그대로 남고, 충돌 훙크만 LLM 출력으로 바뀐다.
+    assert candidates[0].content == "a\nRESOLVED\nc\nEXTRA\n"
 
-    def fake_call(client, prompt):
-        captured.append(prompt)
-        return "merged"
+
+def test_generate_candidates_resolves_multiple_far_apart_hunks():
+    # ours에 EXTRA 줄을 하나 더 넣어 줄 수를 다르게 만든다 — 안 그러면
+    # changed_by_ours == changed_by_theirs가 돼 is_value_conflict가 True를
+    # 반환해서(둘 다 같은 줄들만 건드림) verbatim 경로로 빠져버린다.
+    base = "a\nb\nc\nd\ne\n"
+    ours = "a\nOURS1\nc\nOURS2\ne\nEXTRA\n"
+    theirs = "a\nTHEIRS1\nc\nTHEIRS2\ne\n"
+
+    calls: list[str] = []
+
+    def fake_call(client, prompt, temperature=0.7):
+        calls.append(prompt)
+        if "OURS1" in prompt:
+            return "MERGED1\n"
+        return "MERGED2\n"
 
     build, call = _patch_llm(side_effect=fake_call)
     with build, call:
-        # 줄 수가 다른 구조적 충돌이어야 LLM 경로를 탄다 (값 충돌은 verbatim으로 새감).
-        generate_candidates(
-            base="BASE_TEXT", ours="OURS_TEXT\nEXTRA_LINE", theirs="THEIRS_TEXT", n=1
-        )
-    assert "OURS_TEXT" in captured[0]
-    assert "THEIRS_TEXT" in captured[0]
-    assert "BASE_TEXT" in captured[0]
+        candidates = generate_candidates(base, ours, theirs, n=1)
+
+    assert len(calls) == 2  # 훙크 2개 × 후보 1개
+    assert candidates[0].content == "a\nMERGED1\nc\nMERGED2\ne\nEXTRA\n"
+
+
+def test_generate_candidates_hunk_prompt_includes_all_three_versions():
+    captured: list[str] = []
+
+    def fake_call(client, prompt, temperature=0.7):
+        captured.append(prompt)
+        return "merged\n"
+
+    build, call = _patch_llm(side_effect=fake_call)
+    with build, call:
+        generate_candidates(*_multiline_conflict(), n=1)
+
+    assert "OURS_LINE" in captured[0]
+    assert "THEIRS_LINE" in captured[0]
+    assert "b" in captured[0]  # base 쪽 훙크 내용
 
 
 def test_generate_candidates_missing_api_key_raises():
-    # 줄 수가 다르므로 구조적 충돌 경로(LLM 호출) — 값 충돌 경로는 API 키가 필요 없다.
-    with patch.dict(os.environ, {}, clear=True):
+    # clear=True로 os.environ 전체를 비우면 PATH도 같이 날아가서 내부의
+    # git subprocess 호출이 깨진다 — GEMINI_API_KEY만 타겟으로 비운다.
+    with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
         with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
-            generate_candidates(base="", ours="a\nb", theirs="c", n=1)
+            generate_candidates(*_multiline_conflict(), n=1)
 
 
 @pytest.mark.skipif(
-    not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY 없으면 실제 API 호출 스킵"
+    not os.environ.get("WELD_RUN_LLM_TESTS"),
+    reason="WELD_RUN_LLM_TESTS=1 없으면 스킵 (쿼터/비용 절약 — 일반 pytest에선 안 돈다)",
 )
 def test_generate_candidates_real_llm_produces_valid_python():
-    """실제 Gemini 호출로 문법적으로 유효한 병합 결과를 내는지 확인 (수동/로컬 전용).
-
-    구조적 충돌(줄 추가)을 써서 값 충돌 경로로 새지 않고 실제로 LLM을 타게 한다.
-    """
-    candidates = generate_candidates(
-        base="def greet(name):\n    return name\n",
-        ours='def greet(name):\n    log(name)\n    return f"Hi, {name}"\n',
-        theirs='def greet(name):\n    return f"Hello, {name}!"\n    # theirs comment\n',
-        n=1,
-    )
+    """실제 Gemini 호출로 문법적으로 유효한 병합 결과를 내는지 확인 (수동/로컬 전용)."""
+    base = "def greet(name):\n    return name\n"
+    ours = 'def greet(name):\n    log(name)\n    return f"Hi, {name}"\n'
+    theirs = 'def greet(name):\n    return f"Hello, {name}!"\n    # theirs comment\n'
+    candidates = generate_candidates(base, ours, theirs, n=1)
     compile(candidates[0].content, "<candidate>", "exec")

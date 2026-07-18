@@ -43,7 +43,8 @@ def test_summarize_intent_missing_api_key_raises():
 
 
 @pytest.mark.skipif(
-    not os.environ.get("GEMINI_API_KEY"), reason="GEMINI_API_KEY 없으면 실제 API 호출 스킵"
+    not os.environ.get("WELD_RUN_LLM_TESTS"),
+    reason="WELD_RUN_LLM_TESTS=1 없으면 스킵 (쿼터/비용 절약 — 일반 pytest에선 안 돈다)",
 )
 def test_summarize_intent_real_llm_produces_nonempty_summary():
     summary = summarize_intent(
