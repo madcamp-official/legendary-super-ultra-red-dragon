@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
-from weld.types import MergeCandidate, MutationScore
+from weld.types import MergeCandidate, MutationScore, TestId
 
 
 def compute_mutation_score(
-    candidate: MergeCandidate, relevant_tests: list[str], repo_path: str
+    candidate: MergeCandidate, relevant_tests: list[TestId], repo_path: str
 ) -> MutationScore:
-    """candidate의 변경 영역에 뮤턴트를 주입하고 relevant_tests가 잡아내는지 측정한다."""
+    """candidate의 변경 영역에 뮤턴트를 주입하고 relevant_tests(pytest 노드 ID)가 잡아내는지 측정한다."""
     raise NotImplementedError

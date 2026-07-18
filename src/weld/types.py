@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+TestId = str
+"""테스트를 가리키는 식별자는 파일명이 아니라 **pytest 노드 ID**다.
+예: "tests/verify/test_sandbox.py::test_run_in_sandbox_is_not_implemented_yet".
+파일 단위로는 "그 파일의 테스트가 이 줄을 실행했는지" 여부를 알 수 없어서
+(verify/impact.py의 import 그래프는 후보 파일을 좁히는 1차 필터일 뿐),
+mutation.py가 결함 주입 후 어떤 테스트가 실제로 그 줄을 지나갔는지 확인하려면
+개별 테스트 함수 단위까지 내려가야 한다."""
+
 
 @dataclass(frozen=True)
 class ClassificationResult:
@@ -37,8 +45,8 @@ class VerificationResult:
     candidate_id: str
     compiled: bool
     tests_passed: bool
-    tests_run: list[str] = field(default_factory=list)
-    tests_failed: list[str] = field(default_factory=list)
+    tests_run: list[TestId] = field(default_factory=list)
+    tests_failed: list[TestId] = field(default_factory=list)
     duration_s: float = 0.0
     error: str | None = None
 
@@ -51,6 +59,7 @@ class MutationScore:
     mutants_total: int
     mutants_killed: int
     survived_mutants: list[str] = field(default_factory=list)
+    """생존한 뮤턴트 설명 문자열(예: "mutation.py:42 `<` -> `<=`"). 테스트 ID 아님."""
 
     @property
     def score(self) -> float:

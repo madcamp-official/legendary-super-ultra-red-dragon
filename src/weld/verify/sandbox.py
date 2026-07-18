@@ -6,18 +6,18 @@
 
 from __future__ import annotations
 
-from weld.types import MergeCandidate, VerificationResult
+from weld.types import MergeCandidate, TestId, VerificationResult
 
 
 def run_in_sandbox(
-    candidate: MergeCandidate, repo_path: str, tests: list[str] | None = None
+    candidate: MergeCandidate, repo_path: str, tests: list[TestId] | None = None
 ) -> VerificationResult:
-    """후보 하나를 샌드박스에서 실행한다. tests가 주어지면 그 테스트만 돈다."""
+    """후보 하나를 샌드박스에서 실행한다. tests(pytest 노드 ID)가 주어지면 그 테스트만 돈다."""
     raise NotImplementedError
 
 
 def run_candidates_parallel(
-    candidates: list[MergeCandidate], repo_path: str, tests: list[str] | None = None
+    candidates: list[MergeCandidate], repo_path: str, tests: list[TestId] | None = None
 ) -> list[VerificationResult]:
     """후보 여러 개를 병렬 샌드박스에서 동시에 검증한다."""
     raise NotImplementedError

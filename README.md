@@ -45,6 +45,16 @@ src/weld/
 `tests/`는 `src/weld/`와 같은 구조로 미러링돼 있다 — 자기 모듈의 테스트는
 자기 폴더 안에서만 늘리면 된다.
 
+## "테스트"의 단위 (`TestId`)
+
+파이프라인에서 말하는 "테스트"는 파일명이 아니라 **개별 테스트 함수(pytest
+노드 ID, 예: `tests/verify/test_sandbox.py::test_run_in_sandbox_is_not_implemented_yet`)**다.
+`verify/impact.py`의 import 그래프는 "관련 있을 후보 파일"을 좁히는 1차
+필터일 뿐이고, 실제로 `VerificationResult`/후보 검증에 넘기는 목록은 그
+파일 안의 개별 테스트 함수 단위까지 펼친 것이어야 한다 — `verify/mutation.py`가
+"이 줄을 어떤 테스트가 실제로 실행했는지" 확인하려면 파일 단위로는 부족하기
+때문. `types.py`의 `TestId` 타입이 이 계약을 명시한다.
+
 ## 뮤테이션 엔진 설계 방향 (`verify/mutation.py`)
 
 4개 논문(테스트 오버피팅 실증연구, 오버피팅 서베이, 뮤테이션 테스팅 원조논문
