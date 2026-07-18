@@ -8,7 +8,10 @@ harness/metrics가 그대로 받아 돌아간다.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 # 파이프라인이 한 사례에 대해 최종적으로 취한 행동.
@@ -37,6 +40,11 @@ class EvalCase:
     repo_coverage: float | None = None
     """이 사례가 나온 저장소의 테스트 커버리지(0~1). 커버리지-자동해결률
     상관관계 실험(발표용 그래프)에 쓴다."""
+    source_repo: str = ""
+    """이 충돌이 나온 저장소(경로 또는 URL). 나중에 검증을 다시 돌리려면
+    이 저장소를 아래 source_commit 시점으로 체크아웃해야 한다."""
+    source_commit: str = ""
+    """충돌이 일어난 병합 커밋의 전체 SHA. 재현·재실행용 출처."""
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,24 @@ class EvalOutcome:
     정답을 모르면 None."""
     repo_coverage: float | None = None
     """상관관계 분석용으로 사례에서 그대로 이어받는 커버리지."""
+
+
+def save_cases(cases: list[EvalCase], path: str) -> None:
+    """EvalCase 목록을 JSON 파일로 저장한다(평가셋 고정·재사용용).
+
+    채굴은 매번 저장소를 클론해야 하지만, 한 번 모아 이 함수로 저장해두면
+    같은 세트로 지표를 반복 산출할 수 있다. 충돌 내용(base/ours/theirs/정답)이
+    문자열이라 그대로 직렬화된다. 검증을 다시 돌리려면 각 케이스의
+    source_repo/source_commit으로 저장소를 체크아웃하면 된다.
+    """
+    data = [dataclasses.asdict(c) for c in cases]
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def load_cases(path: str) -> list[EvalCase]:
+    """save_cases로 저장한 JSON 평가셋을 다시 EvalCase 목록으로 불러온다."""
+    data = json.loads(Path(path).read_text())
+    return [EvalCase(**item) for item in data]
 
 
 def load_cases_from_dataset(path: str) -> list[EvalCase]:

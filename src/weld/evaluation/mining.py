@@ -112,6 +112,8 @@ def mine_conflicts(
                     theirs=theirs,
                     file_path=path,
                     ground_truth_resolution=resolution,
+                    source_repo=repo_path,
+                    source_commit=merge,
                 )
             )
 
