@@ -1,0 +1,38 @@
+name: CI
+
+# 언제 돌릴지: main으로 푸시될 때마다, 그리고 모든 Pull Request에서.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # 린트는 한 번만 (파이썬 버전과 무관).
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 의존성 설치
+        run: pip install -e ".[dev]"
+      - name: Ruff 린트
+        run: ruff check src tests
+
+  # 테스트는 선언한 최소 버전(3.11)과 실제 개발 버전(3.13) 둘 다에서.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 의존성 설치
+        run: pip install -e ".[dev]"
+      - name: Pytest
+        run: pytest -q
