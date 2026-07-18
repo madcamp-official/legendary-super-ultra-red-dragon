@@ -8,6 +8,7 @@ verify/policy/escalate)에 있으므로, 자기 파트를 채울 때는 보통 �
 from __future__ import annotations
 
 import configparser
+import dataclasses
 import subprocess
 import sys
 from pathlib import Path
@@ -36,8 +37,13 @@ def main() -> None:
 @click.argument("base_file")
 @click.argument("ours_file")
 @click.argument("theirs_file")
-def merge(base_file: str, ours_file: str, theirs_file: str) -> None:
-    """git merge driver 진입점: `weld merge %O %A %B`.
+@click.argument("path")
+def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
+    """git merge driver 진입점: `weld merge %O %A %B %P`.
+
+    %P는 저장소 내 실제 파일 경로 — %O/%A/%B는 그 파일의 세 리비전을 담은
+    임시 파일이라, 후보를 검증/뮤테이션 테스트할 때 어디에 써야 할지는
+    %P로만 알 수 있다.
 
     exit 0 → git이 자동 커밋. exit 1 → git이 기존 충돌 마커를 남기고
     사람에게 폴백(지금과 동일한 경험).
@@ -51,12 +57,15 @@ def merge(base_file: str, ours_file: str, theirs_file: str) -> None:
         Path(ours_file).write_text(classification.resolved_content or "")
         sys.exit(0)
 
-    candidates = generate_candidates(base, ours, theirs)
-    changed_files = [ours_file]
+    candidates = [
+        dataclasses.replace(c, file_path=path) for c in generate_candidates(base, ours, theirs)
+    ]
+    changed_files = [path]
     relevant_tests = select_relevant_tests(changed_files, repo_path=".")
     verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
     mutation_scores = [
-        compute_mutation_score(c, relevant_tests, repo_path=".") for c in candidates
+        compute_mutation_score(c, relevant_tests, repo_path=".", base_content=base)
+        for c in candidates
     ]
 
     for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
@@ -95,7 +104,7 @@ def install() -> None:
     if section not in config:
         config[section] = {}
     config[section]["name"] = "Weld verified merge driver"
-    config[section]["driver"] = f"{MERGE_DRIVER_NAME} merge %O %A %B"
+    config[section]["driver"] = f"{MERGE_DRIVER_NAME} merge %O %A %B %P"
     with git_config_path.open("w") as f:
         config.write(f)
 

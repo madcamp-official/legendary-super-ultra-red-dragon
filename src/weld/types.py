@@ -36,6 +36,11 @@ class MergeCandidate:
     content: str
     strategy: str = "llm"
     """후보를 만든 전략 이름 (예: "llm-conservative", "llm-aggressive")."""
+    file_path: str = ""
+    """이 후보가 적용될 저장소 내 상대 경로. candidates/generate.py는 신경 쓸 필요
+    없고(기본값 빈 문자열), cli.py가 git이 넘겨준 실제 경로(%P)로 채워 넣는다.
+    verify/sandbox.py, verify/mutation.py가 후보 내용을 실제 파일 위치에 써서
+    테스트를 돌리려면 이 경로가 필요하다."""
 
 
 @dataclass(frozen=True)
