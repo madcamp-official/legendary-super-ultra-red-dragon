@@ -54,6 +54,7 @@ import difflib
 import math
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -256,6 +257,8 @@ def _profile_line_coverage(
     try:
         subprocess.run(
             [
+                sys.executable,
+                "-m",
                 "coverage",
                 "run",
                 f"--rcfile={rc_file}",
@@ -298,7 +301,7 @@ def _run_tests_with_coverage(
     data_file = tmp_repo / ".weld-mutation-coverage"
     try:
         result = subprocess.run(
-            ["coverage", "run", f"--data-file={data_file}", "-m", "pytest", "-q", *tests],
+            [sys.executable, "-m", "coverage", "run", f"--data-file={data_file}", "-m", "pytest", "-q", *tests],
             cwd=tmp_repo,
             capture_output=True,
             text=True,
