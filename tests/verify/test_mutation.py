@@ -55,6 +55,87 @@ def test_collect_mutation_sites_flags_boolean_and_numeric_literals():
     assert "literal_to_minus_one" in ops2
 
 
+def test_collect_mutation_sites_flags_arithmetic_flip():
+    source = "def f(a, b):\n    return a + b\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    ops = {s.operator for s in sites}
+    assert "arithmetic_flip" in ops
+
+
+def test_collect_mutation_sites_flags_logical_flip():
+    source = "def f(a, b):\n    x = a and b\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    ops = {s.operator for s in sites}
+    assert "logical_flip" in ops
+
+
+def test_collect_mutation_sites_flags_string_literal():
+    source = 'def f():\n    x = "hello"\n'
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    ops = {s.operator for s in sites}
+    assert "string_to_empty" in ops
+
+
+def test_collect_mutation_sites_ignores_empty_string_literal():
+    source = 'def f():\n    x = ""\n'
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    assert not any(s.operator == "string_to_empty" for s in sites)
+
+
+def test_collect_mutation_sites_flags_statement_removal_for_simple_statement():
+    source = "def f(a):\n    y = a\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    ops = {s.operator for s in sites}
+    assert "statement_removal" in ops
+
+
+def test_collect_mutation_sites_excludes_compound_statements_from_sbr():
+    source = "def f(a):\n    if a:\n        pass\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2, 3})
+    # if문 자체(2번 줄)는 compound라 SBR 대상에서 빠져야 한다.
+    assert not any(s.lineno == 2 and s.operator == "statement_removal" for s in sites)
+
+
+def test_collect_mutation_sites_excludes_logging_calls_from_sbr():
+    source = 'def f():\n    logger.debug("processing")\n'
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    assert not any(s.operator == "statement_removal" for s in sites)
+
+
+def test_collect_mutation_sites_excludes_docstrings_from_sbr():
+    source = 'def f():\n    """docstring"""\n    return 1\n'
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    assert not any(s.operator == "statement_removal" for s in sites)
+
+
+def test_collect_mutation_sites_excludes_return_from_sbr():
+    source = "def f():\n    return 1\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    assert not any(s.operator == "statement_removal" for s in sites)
+
+
+def test_apply_site_statement_removal_produces_valid_pass():
+    source = "def f(a):\n    y = a\n    return y\n"
+    tree = ast.parse(source)
+    sites = _collect_mutation_sites(tree, changed_lines={2})
+    sbr_site = next(s for s in sites if s.operator == "statement_removal")
+    mutated = _apply_site(tree, sbr_site)
+    ast.parse(mutated)  # 문법 오류면 여기서 예외
+    assert "pass" in mutated
+    assert "y = a" not in mutated
+    # 원본 트리는 안 건드렸는지 확인
+    assert ast.unparse(tree) == source.strip()
+
+
 def test_apply_site_produces_syntactically_valid_mutated_source():
     source = "def f(a, b):\n    return a >= b\n"
     tree = ast.parse(source)

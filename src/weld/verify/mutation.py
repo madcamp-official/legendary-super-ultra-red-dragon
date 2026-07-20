@@ -1,4 +1,4 @@
-"""담당: 김민재 (핵심 기여)
+"""담당: 김민재 (핵심 기여) / 오퍼레이터 확장(AOR/LCR/문자열/SBR): 이서영
 
 뮤테이션 테스팅-라이트 엔진. "이 줄이 테스트로 실행됐나"가 아니라 "이 줄에
 결함을 주입해도 테스트가 진짜로 잡아내나"를 확인한다.
@@ -18,11 +18,22 @@
 5. 100%를 요구하지 않는다(규칙 4) — 동등 뮤턴트가 일부 survive하는 건
    정상이고, 그 목록을 survived_mutants에 그대로 남긴다.
 
-MVP 오퍼레이터 4개: 비교연산자 반전, 불리언 반전, 상수 오프바이원(0/-1),
-null 체크 제거. null 체크 제거는 None 비교의 `is`/`is not`을 반전하는
+오퍼레이터 8개: 비교연산자 반전, 불리언 반전, 상수 오프바이원(0/-1),
+null 체크 제거, 산술연산자 반전(AOR), 논리연산자 반전(LCR), 문자열 리터럴
+제거, 문장 삭제(SBR). null 체크 제거는 None 비교의 `is`/`is not`을 반전하는
 것으로 구현했다 — 조건을 통째로 지우는 것과 실질적으로 같은 실패 모드
 (반대로 동작하는 null 체크)를 포착하면서, AST 노드를 부모 참조 없이
 제자리에서만 바꾸는 이 엔진의 단순한 구조에 맞췄다.
+
+문장 삭제(SBR)는 노드를 부모의 body 리스트에서 제거하는 대신, 같은 노드
+객체의 `__class__`를 `ast.Pass`로 바꿔치기하고 위치 정보만 이어붙인다 —
+부모 참조 없이도 "이 문장을 지워도 테스트가 잡아내는가"를 검증할 수 있다.
+compound 문장(if/for/while/함수 등, body를 가진 노드)은 SBR 대상에서 제외한다
+— 안 그러면 changed_lines 밖의, 아직 안 건드린 중첩 코드까지 통째로 날아가서
+"변경 영역에만 뮤턴트를 넣는다"는 규칙(1번)을 넓은 단위에서 어기게 된다.
+로깅 호출(`log.debug(...)` 등)과 독스트링류(문자열 리터럴 단독 문장)도 SBR/
+문자열 오퍼레이터 대상에서 제외한다 — 이런 문장은 어떤 테스트도 관찰하지
+않아 뮤턴트가 항상 생존해서, 실제 위험 신호 없이 점수만 깎아먹는다.
 
 적응형 뮤턴트 스케줄링(심화 기여):
 "모든 뮤턴트를 브루트포스로 다 돌리기"를 "제한된 시간 예산 안에서 최대
@@ -78,6 +89,47 @@ _COMPARISON_FLIPS: dict[type, type] = {
     ast.IsNot: ast.Is,
 }
 
+_ARITHMETIC_FLIPS: dict[type, type] = {
+    ast.Add: ast.Sub,
+    ast.Sub: ast.Add,
+    ast.Mult: ast.Div,
+    ast.Div: ast.Mult,
+}
+
+_LOGICAL_FLIPS: dict[type, type] = {
+    ast.And: ast.Or,
+    ast.Or: ast.And,
+}
+
+# body를 가진(compound) 문장 — SBR 대상에서 제외한다. 통째로 pass화하면
+# changed_lines 밖의, 아직 안 건드린 중첩 코드까지 날아가서 "변경 영역에만
+# 뮤턴트를 넣는다"는 규칙을 넓은 단위에서 어기게 된다.
+_COMPOUND_STMT_TYPES: tuple[type, ...] = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.Try,
+    ast.With,
+    ast.AsyncWith,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+)
+_SBR_EXCLUDED_TYPES: tuple[type, ...] = (
+    ast.Return,
+    ast.Pass,
+    ast.Global,
+    ast.Nonlocal,
+    ast.Import,
+    ast.ImportFrom,
+    *_COMPOUND_STMT_TYPES,
+)
+
+_LOGGING_METHOD_NAMES = {
+    "debug", "info", "warning", "warn", "error", "critical", "exception", "log",
+}
+
 
 @dataclass
 class _MutationSite:
@@ -122,11 +174,59 @@ def _flip_bool(node: ast.AST) -> None:
     node.value = not node.value  # type: ignore[attr-defined]
 
 
-def _set_constant(target_value: int) -> Callable[[ast.AST], None]:
+def _set_constant(target_value: int | str) -> Callable[[ast.AST], None]:
     def mutate(node: ast.AST) -> None:
         node.value = target_value  # type: ignore[attr-defined]
 
     return mutate
+
+
+def _make_op_attr_flip(new_op_type: type) -> Callable[[ast.AST], None]:
+    """BinOp/BoolOp처럼 연산자를 단일 `.op` 속성으로 갖는 노드용 반전 헬퍼."""
+
+    def mutate(node: ast.AST) -> None:
+        node.op = new_op_type()  # type: ignore[attr-defined]
+
+    return mutate
+
+
+def _replace_with_pass(node: ast.AST) -> None:
+    """문장 노드를 그 자리에서 `ast.Pass`로 바꿔치기한다(SBR).
+
+    부모의 body 리스트에서 노드를 제거하는 대신, 같은 객체의 `__class__`를
+    바꾸고 위치 정보만 이어붙인다 — 이 엔진이 부모 참조 없이 노드 하나를
+    제자리에서만 변형하는 구조이기 때문에 택한 방식. `ast.unparse`의 Pass
+    방문자는 위치 정보 외 다른 필드를 참조하지 않으므로 안전하게 동작한다.
+    """
+    lineno = node.lineno  # type: ignore[attr-defined]
+    col_offset = node.col_offset  # type: ignore[attr-defined]
+    end_lineno = getattr(node, "end_lineno", lineno)
+    end_col_offset = getattr(node, "end_col_offset", col_offset)
+    node.__dict__.clear()
+    node.__class__ = ast.Pass
+    node.lineno = lineno
+    node.col_offset = col_offset
+    node.end_lineno = end_lineno
+    node.end_col_offset = end_col_offset
+
+
+def _is_low_signal_statement(node: ast.AST) -> bool:
+    """뮤턴트로 바꿔도 어떤 테스트도 관찰할 수 없어 항상 생존하는 문장인지.
+
+    로깅 호출(`log.debug(...)` 등)과 독스트링류(문자열 리터럴 단독 문장)가
+    대표적이다 — 이런 문장을 SBR 후보에 넣으면 실제 위험 신호 없이 뮤테이션
+    점수만 깎여서, 멀쩡한 후보가 억울하게 에스컬레이션될 수 있다.
+    """
+    if not isinstance(node, ast.Expr):
+        return False
+    if isinstance(node.value, ast.Call):
+        func = node.value.func
+        if isinstance(func, ast.Attribute) and func.attr in _LOGGING_METHOD_NAMES:
+            return True
+        if isinstance(func, ast.Name) and func.id in _LOGGING_METHOD_NAMES:
+            return True
+        return False
+    return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
 
 
 def _collect_mutation_sites(tree: ast.AST, changed_lines: set[int]) -> list[_MutationSite]:
@@ -204,6 +304,74 @@ def _collect_mutation_sites(tree: ast.AST, changed_lines: set[int]) -> list[_Mut
                             mutate=_set_constant(-1),
                         )
                     )
+            elif isinstance(node.value, str) and node.value != "":
+                sites.append(
+                    _MutationSite(
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                        node_type=ast.Constant,
+                        operator="string_to_empty",
+                        description=(
+                            f"string_to_empty @ line {node.lineno}: {node.value!r} -> ''"
+                        ),
+                        mutate=_set_constant(""),
+                    )
+                )
+
+        elif isinstance(node, ast.BinOp):
+            op_type = type(node.op)
+            if op_type in _ARITHMETIC_FLIPS:
+                new_op_type = _ARITHMETIC_FLIPS[op_type]
+                sites.append(
+                    _MutationSite(
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                        node_type=ast.BinOp,
+                        operator="arithmetic_flip",
+                        description=(
+                            f"arithmetic_flip @ line {node.lineno}: "
+                            f"{op_type.__name__} -> {new_op_type.__name__}"
+                        ),
+                        mutate=_make_op_attr_flip(new_op_type),
+                    )
+                )
+
+        elif isinstance(node, ast.BoolOp):
+            op_type = type(node.op)
+            if op_type in _LOGICAL_FLIPS:
+                new_op_type = _LOGICAL_FLIPS[op_type]
+                sites.append(
+                    _MutationSite(
+                        lineno=node.lineno,
+                        col_offset=node.col_offset,
+                        node_type=ast.BoolOp,
+                        operator="logical_flip",
+                        description=(
+                            f"logical_flip @ line {node.lineno}: "
+                            f"{op_type.__name__} -> {new_op_type.__name__}"
+                        ),
+                        mutate=_make_op_attr_flip(new_op_type),
+                    )
+                )
+
+        if (
+            isinstance(node, ast.stmt)
+            and not isinstance(node, _SBR_EXCLUDED_TYPES)
+            and not _is_low_signal_statement(node)
+        ):
+            sites.append(
+                _MutationSite(
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                    node_type=type(node),
+                    operator="statement_removal",
+                    description=(
+                        f"statement_removal @ line {node.lineno}: "
+                        f"{type(node).__name__} -> pass"
+                    ),
+                    mutate=_replace_with_pass,
+                )
+            )
     return sites
 
 
