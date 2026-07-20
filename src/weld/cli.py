@@ -20,10 +20,10 @@ from weld.candidates.summarize import summarize_intent
 from weld.classify.mergiraf import classify_conflict
 from weld.escalate.report import build_escalation_report
 from weld.policy.trust import decide
-from weld.types import EscalationReport
+from weld.types import EscalationReport, MergeCandidate
 from weld.verify.impact import select_relevant_tests
 from weld.verify.mutation import compute_mutation_score
-from weld.verify.sandbox import run_candidates_parallel
+from weld.verify.sandbox import run_candidates_parallel, run_in_sandbox
 
 MERGE_DRIVER_NAME = "weld"
 
@@ -57,17 +57,29 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
     theirs = Path(theirs_file).read_text()
 
     try:
+        changed_files = [path]
+        relevant_tests = select_relevant_tests(changed_files, repo_path=".")
+
         classification = classify_conflict(base, ours, theirs)
         if classification.is_spurious:
-            Path(ours_file).write_text(classification.resolved_content or "")
-            sys.exit(0)
+            spurious_candidate = MergeCandidate(
+                id="mergiraf-spurious",
+                content=classification.resolved_content or "",
+                strategy="mergiraf",
+                file_path=path,
+            )
+            spurious_verification = run_in_sandbox(
+                spurious_candidate, repo_path=".", tests=relevant_tests
+            )
+            if spurious_verification.compiled and spurious_verification.tests_passed:
+                Path(ours_file).write_text(spurious_candidate.content)
+                sys.exit(0)
+            # mergiraf가 오판했을 수 있으니 테스트 실패 시 진짜 충돌 파이프라인으로 폴백.
 
         candidates = [
             dataclasses.replace(c, file_path=path)
             for c in generate_candidates(base, ours, theirs)
         ]
-        changed_files = [path]
-        relevant_tests = select_relevant_tests(changed_files, repo_path=".")
         verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
         mutation_scores = [
             compute_mutation_score(c, relevant_tests, repo_path=".", base_content=base)
