@@ -529,11 +529,17 @@ def compute_mutation_score(
     sites = _collect_mutation_sites(tree, changed_lines)
 
     if not sites or not relevant_tests or not candidate.file_path:
-        return MutationScore(candidate_id=candidate.id, mutants_total=0, mutants_killed=0)
+        return MutationScore(
+            candidate_id=candidate.id,
+            mutants_total=0,
+            mutants_killed=0,
+            sites_total=len(sites),
+        )
 
     killed = 0
     total = 0
     runs = 0
+    uncovered = 0
     survived: list[str] = []
 
     with tempfile.TemporaryDirectory(prefix="weld-mutation-") as tmp:
@@ -564,6 +570,7 @@ def compute_mutation_score(
 
             if not executed:
                 # 이 뮤턴트는 테스트가 그 줄을 지나가지도 않았다 — 판단 불가, 집계 제외.
+                uncovered += 1
                 continue
 
             total += 1
@@ -583,4 +590,6 @@ def compute_mutation_score(
         mutants_total=total,
         mutants_killed=killed,
         survived_mutants=survived,
+        sites_total=len(sites),
+        mutants_uncovered=uncovered,
     )

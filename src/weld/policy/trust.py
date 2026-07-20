@@ -1,11 +1,18 @@
-"""담당: 이서영
+"""담당: 이서영 / mutants_total==0 이유별 분기: 김민재
 
 verify(컴파일+테스트)와 mutation(결함 주입 검증) 결과를 종합해 후보 하나를
 자동 채택할지, 사람에게 에스컬레이션할지 최종 판정한다.
 
-지금은 최소 버전 — 컴파일+테스트 통과만 확인한다. mutants_total이 0(아직
-mutation.py 미완성이거나 관련 뮤턴트가 없는 경우)이면 뮤테이션 점수는 판정에서
-제외한다. 팀원A의 mutation.py가 완성되면 여기에 점수 임계값을 추가한다.
+mutants_total==0은 "뮤테이션 통과"가 아니라 "뮤테이션이 아무 신호도 못 줬다"는
+뜻이다. 예전엔 이 경우 뮤테이션 검사를 통째로 건너뛰고 채택해서, 검증 근거가
+전혀 없는 후보(예: 테스트가 안 지나가는 버전 문자열 변경)도 "뮤테이션 점수
+충족"으로 포장됐다. 지금은 0이 나온 이유(MutationScore.sites_total /
+mutants_uncovered / VerificationResult.tests_run)에 따라 갈라 판정한다:
+
+  - 실행된 테스트가 아예 없음            → 에스컬레이션 (검증 근거 없음)
+  - 사이트는 있는데 테스트가 커버 안 함   → 에스컬레이션 (변경 영역 미커버)
+  - 변형할 코드 자체가 없음 + verbatim   → 채택 (합성 리스크 없음, 테스트 통과)
+  - 변형할 코드 자체가 없음 + LLM 합성   → 에스컬레이션 (합성 코드인데 근거 없음)
 """
 
 from __future__ import annotations
@@ -15,8 +22,17 @@ from weld.types import MergeCandidate, MutationScore, TrustDecision, Verificatio
 MUTATION_SCORE_THRESHOLD = 0.8
 
 
-def decide(verification: VerificationResult, mutation: MutationScore) -> TrustDecision:
-    """검증+뮤테이션 결과를 종합해 채택 여부를 판정한다."""
+def decide(
+    verification: VerificationResult,
+    mutation: MutationScore,
+    candidate: MergeCandidate | None = None,
+) -> TrustDecision:
+    """검증+뮤테이션 결과를 종합해 채택 여부를 판정한다.
+
+    candidate가 주어지면 mutants_total==0일 때 후보의 strategy(verbatim인지
+    LLM 합성인지)까지 반영한다. 안 주어지면(구버전 호출부) 합성으로 보고
+    보수적으로 판정한다.
+    """
     if not verification.compiled:
         return TrustDecision(
             accepted=False,
@@ -32,17 +48,66 @@ def decide(verification: VerificationResult, mutation: MutationScore) -> TrustDe
             reason=f"테스트 실패: {failed}",
         )
 
-    if mutation.mutants_total > 0 and mutation.score < MUTATION_SCORE_THRESHOLD:
+    if not verification.tests_run:
         return TrustDecision(
             accepted=False,
             candidate_id=None,
-            reason=f"뮤테이션 점수 미달: {mutation.score:.0%} < {MUTATION_SCORE_THRESHOLD:.0%}",
+            reason="실행된 테스트가 없음 — '통과'가 공허해서 검증 근거가 없음, 에스컬레이션",
+        )
+
+    if mutation.mutants_total > 0:
+        if mutation.score < MUTATION_SCORE_THRESHOLD:
+            return TrustDecision(
+                accepted=False,
+                candidate_id=None,
+                reason=f"뮤테이션 점수 미달: {mutation.score:.0%} < {MUTATION_SCORE_THRESHOLD:.0%}",
+            )
+        return TrustDecision(
+            accepted=True,
+            candidate_id=verification.candidate_id,
+            reason=(
+                f"컴파일+테스트 통과, 뮤테이션 검증 통과 "
+                f"({mutation.mutants_killed}/{mutation.mutants_total} kill)"
+            ),
+        )
+
+    # ---- mutants_total == 0: 이유별 분기 (모듈 docstring의 표와 동일) ----
+
+    if mutation.sites_total > 0:
+        # 변형할 코드는 있었는데 판정된 뮤턴트가 0 — 테스트가 변경 영역을
+        # 지나가지 않았다는 뜻(uncovered). 테스트가 못 보는 코드를 자동
+        # 병합하면 안 된다.
+        return TrustDecision(
+            accepted=False,
+            candidate_id=None,
+            reason=(
+                f"변경 영역을 지나가는 테스트 없음 (뮤테이션 사이트 "
+                f"{mutation.sites_total}개 중 판정 0개, 미커버 "
+                f"{mutation.mutants_uncovered}개) — 에스컬레이션"
+            ),
+        )
+
+    # sites_total == 0: 변경 영역에 변형 가능한 코드 자체가 없음 (버전 문자열,
+    # 주석/독스트링만 바뀐 경우 등). verbatim(한쪽 그대로)은 합성 리스크가
+    # 없으니 테스트 통과만으로 채택하고, LLM이 지어낸 코드는 뮤테이션 근거
+    # 없이 믿지 않는다.
+    if candidate is not None and candidate.strategy.endswith("verbatim"):
+        return TrustDecision(
+            accepted=True,
+            candidate_id=verification.candidate_id,
+            reason=(
+                "컴파일+테스트 통과 — 변경 영역에 변형 가능한 코드가 없어 "
+                "뮤테이션은 해당 없음, verbatim 후보(합성 리스크 없음)라 채택"
+            ),
         )
 
     return TrustDecision(
-        accepted=True,
-        candidate_id=verification.candidate_id,
-        reason="컴파일+테스트 통과, 뮤테이션 점수 충족",
+        accepted=False,
+        candidate_id=None,
+        reason=(
+            "LLM 합성 후보인데 뮤테이션이 아무 신호도 못 줌 (변형 가능한 "
+            "코드 없음) — 합성 코드를 근거 없이 믿지 않고 에스컬레이션"
+        ),
     )
 
 
@@ -64,7 +129,7 @@ def decide_among(
     에스컬레이션한다 — README 판정 정책 표와 동일한 규칙.
     """
     decisions = [
-        (candidate, decide(verification, mutation))
+        (candidate, decide(verification, mutation, candidate))
         for candidate, verification, mutation in zip(candidates, verifications, mutation_scores)
     ]
     accepted = [(candidate, decision) for candidate, decision in decisions if decision.accepted]

@@ -70,6 +70,14 @@ class MutationScore:
     mutants_killed: int
     survived_mutants: list[str] = field(default_factory=list)
     """생존한 뮤턴트 설명 문자열(예: "mutation.py:42 `<` -> `<=`"). 테스트 ID 아님."""
+    sites_total: int = 0
+    """변경 영역에서 발견된 뮤테이션 사이트 수. mutants_total==0일 때 그 이유를
+    구분하는 데 쓴다 — 0이면 "변형할 코드 자체가 없음"(버전 문자열만 바뀐 경우 등),
+    0보다 크면 "사이트는 있는데 테스트가 실행/커버하지 못함"."""
+    mutants_uncovered: int = 0
+    """주입은 했지만 테스트가 그 줄을 지나가지 않아 판정 불가로 제외된 뮤턴트 수.
+    sites_total>0 && mutants_total==0 && mutants_uncovered>0 이면 "변경 영역을
+    지나가는 테스트가 없다"는 뜻이라 policy.trust가 에스컬레이션 근거로 쓴다."""
 
     @property
     def score(self) -> float:
