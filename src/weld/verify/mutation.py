@@ -525,7 +525,13 @@ def compute_mutation_score(
         보고 남은 뮤턴트를 안 돌린다. None이면 조기 종료 없음.
     """
     changed_lines = _changed_line_numbers(base_content, candidate.content)
-    tree = ast.parse(candidate.content)
+    try:
+        tree = ast.parse(candidate.content)
+    except SyntaxError:
+        # LLM이 코드가 아닌 응답(산문 등)을 내놓은 후보 — sandbox의 컴파일
+        # 게이트가 어차피 거르므로, 여기서 크래시로 파이프라인 전체를 죽이지
+        # 말고 "신호 없음"으로 조용히 반환한다.
+        return MutationScore(candidate_id=candidate.id, mutants_total=0, mutants_killed=0)
     sites = _collect_mutation_sites(tree, changed_lines)
 
     if not sites or not relevant_tests or not candidate.file_path:

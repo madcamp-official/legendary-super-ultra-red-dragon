@@ -122,6 +122,23 @@ def test_decide_among_escalates_when_no_candidate_passes():
     assert decision.candidate_id is None
 
 
+def test_decide_among_accepts_identical_content_candidates():
+    """온도만 다른 LLM 후보 둘이 같은 병합 결과에 수렴해 둘 다 통과한 경우 —
+    모순이 아니라 합의라서 채택해야 한다 (내용 기준 중복 제거)."""
+    candidates = [
+        MergeCandidate(id="c-0", content="merged\n", strategy="llm-hunk-t0.2"),
+        MergeCandidate(id="c-1", content="merged\n", strategy="llm-hunk-t0.7"),
+    ]
+    verifications = [_passing("c-0"), _passing("c-1")]
+    mutations = [
+        MutationScore(candidate_id="c-0", mutants_total=4, mutants_killed=4),
+        MutationScore(candidate_id="c-1", mutants_total=4, mutants_killed=4),
+    ]
+    decision = decide_among(candidates, verifications, mutations)
+    assert decision.accepted is True
+    assert decision.candidate_id == "c-0"
+
+
 def test_decide_among_escalates_when_multiple_candidates_pass():
     """값 충돌 — ours/theirs 둘 다 통과하면(스왑해도 테스트가 구분 못 함)
     어느 쪽도 자동 채택하지 않고 에스컬레이션해야 한다."""

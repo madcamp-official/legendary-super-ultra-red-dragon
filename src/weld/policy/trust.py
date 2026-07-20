@@ -134,6 +134,14 @@ def decide_among(
     ]
     accepted = [(candidate, decision) for candidate, decision in decisions if decision.accepted]
 
+    # 내용이 같은 후보는 하나로 센다 — 온도만 다른 LLM 후보 둘이 같은 병합
+    # 결과에 수렴해 둘 다 통과하는 건 "서로 모순되는 후보가 여럿 통과"가
+    # 아니라 합의라서, 스왑 테스트가 걸러내려는 신호가 아니다.
+    unique_accepted: dict[str, tuple[MergeCandidate, TrustDecision]] = {}
+    for candidate, decision in accepted:
+        unique_accepted.setdefault(candidate.content.strip(), (candidate, decision))
+    accepted = list(unique_accepted.values())
+
     if len(accepted) == 1:
         return accepted[0][1]
 
