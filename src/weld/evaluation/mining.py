@@ -70,12 +70,18 @@ def _is_two_sided_conflict(base: str | None, ours: str, theirs: str) -> bool:
 
 
 def mine_conflicts(
-    repo_path: str, *, max_cases: int | None = None, python_only: bool = True
+    repo_path: str,
+    *,
+    max_cases: int | None = None,
+    python_only: bool = True,
+    extensions: tuple[str, ...] | None = None,
 ) -> list[EvalCase]:
     """저장소의 병합 커밋들을 훑어 실제 충돌을 EvalCase로 반환한다.
 
     max_cases: 이 개수만큼 모으면 멈춘다(작게 시작하기 좋게). None이면 전부.
-    python_only: .py 충돌만 수집(언어 스코프 Python 고정 MVP에 맞춤).
+    python_only: .py 충돌만 수집(기존 호출부 호환용 기본값).
+    extensions: 주어지면 python_only 대신 이 확장자들(점 포함, 예: (".js", ".ts"))만
+        수집한다 — 다국어 채굴용.
     """
     merges = _git(repo_path, ["rev-list", "--merges", "HEAD"]).stdout.split()
     cases: list[EvalCase] = []
@@ -90,7 +96,10 @@ def mine_conflicts(
         for path in _conflicted_paths(repo_path, p1, p2):
             if max_cases is not None and len(cases) >= max_cases:
                 return cases
-            if python_only and not path.endswith(".py"):
+            if extensions is not None:
+                if not any(path.endswith(ext) for ext in extensions):
+                    continue
+            elif python_only and not path.endswith(".py"):
                 continue
 
             ours = _file_at(repo_path, p1, path)
