@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -29,13 +30,65 @@ _TEST_TIMEOUT_S = 120
 _TEST_RESULT_RE = re.compile(r"^(\S+::\S+)\s+(PASSED|FAILED|ERROR|SKIPPED)\b")
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """proc가 낳은 자식까지 통째로 죽인다. proc.kill()은 직계만 죽여서
+    pytest가 낳은 손자 프로세스(coverage subprocess mode, xdist worker 등)가
+    타임아웃 뒤에도 고아로 남아 영원히 도는 사고를 막는다."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True,
+            timeout=10,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    proc.kill()
+
+
+def _run(
+    cmd: list[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """subprocess.run과 동등하지만 타임아웃 시 프로세스 트리를 통째로 죽인다.
+
+    별도 프로세스 그룹(POSIX: start_new_session, Windows: 새 프로세스 그룹)으로
+    띄워야 트리 전체를 한 번에 죽일 대상을 잡을 수 있다.
+    """
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **kwargs,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
 def _add_worktree(repo_path: str, worktree: Path) -> str | None:
     """detached worktree를 만든다. 실패하면 에러 메시지를, 성공하면 None을 반환한다."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["git", "-C", repo_path, "worktree", "add", "--detach", str(worktree), "HEAD"],
-            capture_output=True,
-            text=True,
             timeout=_WORKTREE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
@@ -46,12 +99,13 @@ def _add_worktree(repo_path: str, worktree: Path) -> str | None:
 
 
 def _remove_worktree(repo_path: str, worktree: Path) -> None:
-    subprocess.run(
-        ["git", "-C", repo_path, "worktree", "remove", "--force", str(worktree)],
-        capture_output=True,
-        text=True,
-        timeout=_WORKTREE_TIMEOUT_S,
-    )
+    try:
+        _run(
+            ["git", "-C", repo_path, "worktree", "remove", "--force", str(worktree)],
+            timeout=_WORKTREE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _check_compiles(worktree: Path, file_path: str) -> tuple[bool, str | None]:
@@ -60,10 +114,8 @@ def _check_compiles(worktree: Path, file_path: str) -> tuple[bool, str | None]:
         return True, None
     target = worktree / file_path
     try:
-        result = subprocess.run(
+        result = _run(
             [sys.executable, "-m", "py_compile", str(target)],
-            capture_output=True,
-            text=True,
             timeout=_COMPILE_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired:
@@ -117,11 +169,9 @@ def _run_tests(
         cmd += list(tests)
 
     try:
-        result = subprocess.run(
+        result = _run(
             cmd,
             cwd=worktree,
-            capture_output=True,
-            text=True,
             timeout=_TEST_TIMEOUT_S,
             env=_sandbox_env(worktree),
         )
