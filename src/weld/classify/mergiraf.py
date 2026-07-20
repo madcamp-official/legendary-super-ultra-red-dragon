@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from weld.langs import language_suffix
 from weld.types import ClassificationResult
 
 MERGIRAF_BIN = os.environ.get("WELD_MERGIRAF_BIN", "mergiraf")
@@ -29,19 +30,24 @@ def _has_conflict_markers(text: str) -> bool:
     return any(marker in text for marker in _CONFLICT_MARKERS)
 
 
-def classify_conflict(base: str, ours: str, theirs: str) -> ClassificationResult:
+def classify_conflict(
+    base: str, ours: str, theirs: str, file_path: str = ""
+) -> ClassificationResult:
     """3-way 충돌을 Mergiraf에 넘겨 가짜/진짜를 분류한다.
 
     가짜 충돌이면 resolved_content에 Mergiraf가 만든 최종 병합 결과를 채운다.
+
+    file_path: 원본 파일의 저장소 내 경로. mergiraf는 파일 확장자로 tree-sitter
+    문법을 고르므로, 실제 확장자를 임시 파일에 그대로 붙여야 해당 언어로
+    분류된다. 생략하면(기존 호출부 호환) Python(.py)으로 간주한다.
     """
+    suffix = language_suffix(file_path) if file_path else ".py"
     with tempfile.TemporaryDirectory(prefix="weld-mergiraf-") as tmpdir:
         tmp = Path(tmpdir)
-        # 언어 스코프가 Python 단일 언어로 고정돼 있어(MVP) .py로 고정한다.
-        # 스트레치로 다른 언어를 붙일 때는 실제 파일 확장자를 인자로 받아야 함.
-        base_path = tmp / "base.py"
-        ours_path = tmp / "ours.py"
-        theirs_path = tmp / "theirs.py"
-        output_path = tmp / "output.py"
+        base_path = tmp / f"base{suffix}"
+        ours_path = tmp / f"ours{suffix}"
+        theirs_path = tmp / f"theirs{suffix}"
+        output_path = tmp / f"output{suffix}"
         base_path.write_text(base)
         ours_path.write_text(ours)
         theirs_path.write_text(theirs)
