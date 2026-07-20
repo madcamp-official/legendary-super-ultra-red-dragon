@@ -19,7 +19,7 @@ from weld.candidates.generate import generate_candidates
 from weld.candidates.summarize import summarize_intent
 from weld.classify.mergiraf import classify_conflict
 from weld.escalate.report import build_escalation_report
-from weld.policy.trust import decide
+from weld.policy.trust import decide_among
 from weld.types import EscalationReport, MergeCandidate
 from weld.verify.impact import select_relevant_tests
 from weld.verify.mutation import compute_mutation_score
@@ -86,11 +86,11 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             for c in candidates
         ]
 
-        for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
-            decision = decide(verification, mutation)
-            if decision.accepted:
-                Path(ours_file).write_text(candidate.content)
-                sys.exit(0)
+        decision = decide_among(candidates, verifications, mutation_scores)
+        if decision.accepted:
+            accepted_candidate = next(c for c in candidates if c.id == decision.candidate_id)
+            Path(ours_file).write_text(accepted_candidate.content)
+            sys.exit(0)
 
         intent_summary = summarize_intent(base, ours, theirs)
         report = EscalationReport(

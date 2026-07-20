@@ -70,3 +70,21 @@ def test_value_conflict_with_loose_test_escalates(tmp_path):
     )
     outcome = run_case(case, repo_path=str(repo))
     assert outcome.action == "escalated"
+
+
+def test_value_conflict_where_both_candidates_pass_escalates(tmp_path):
+    """스왑 테스트 핵심 케이스 — 테스트가 "양수인지"만 보고 정확한 값은 안 봐서
+    ours(5000)/theirs(4000) 둘 다 개별적으로 통과 + 뮤테이션 점수도 충족한다.
+    둘 다 통과했다는 것 자체가 "경쟁하는 값 중 뭐가 맞는지 테스트로는 구분
+    못 한다"는 신호라, 어느 한쪽도 자동 채택하지 않고 에스컬레이션해야 한다."""
+    repo = _make_repo(tmp_path, "    assert shipping_fee() > 0\n")
+    case = EvalCase(
+        id="both-pass",
+        base=BASE,
+        ours=OURS,
+        theirs=THEIRS,
+        file_path="pricing.py",
+        relevant_tests=["test_pricing.py::test_shipping_fee"],
+    )
+    outcome = run_case(case, repo_path=str(repo))
+    assert outcome.action == "escalated"

@@ -17,7 +17,7 @@ import dataclasses
 from weld.candidates.generate import generate_candidates
 from weld.classify.mergiraf import classify_conflict
 from weld.evaluation.cases import EvalCase, EvalOutcome
-from weld.policy.trust import decide
+from weld.policy.trust import decide_among
 from weld.verify.impact import select_relevant_tests
 from weld.verify.mutation import compute_mutation_score
 from weld.verify.sandbox import run_candidates_parallel
@@ -54,15 +54,16 @@ def run_case(case: EvalCase, repo_path: str) -> EvalOutcome:
             for c in candidates
         ]
 
-        for candidate, verification, mutation in zip(candidates, verifications, mutation_scores):
-            if decide(verification, mutation).accepted:
-                correct = _matches_ground_truth(candidate.content, case)
-                return EvalOutcome(
-                    case_id=case.id,
-                    action="auto_verified",
-                    correct=correct,
-                    repo_coverage=case.repo_coverage,
-                )
+        decision = decide_among(candidates, verifications, mutation_scores)
+        if decision.accepted:
+            accepted_candidate = next(c for c in candidates if c.id == decision.candidate_id)
+            correct = _matches_ground_truth(accepted_candidate.content, case)
+            return EvalOutcome(
+                case_id=case.id,
+                action="auto_verified",
+                correct=correct,
+                repo_coverage=case.repo_coverage,
+            )
 
         return EvalOutcome(
             case_id=case.id, action="escalated", repo_coverage=case.repo_coverage
