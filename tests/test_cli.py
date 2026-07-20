@@ -36,9 +36,12 @@ def test_install_registers_merge_driver_with_percent_placeholders(tmp_path, monk
     assert "* merge=weld\n" in gitattributes
 
 
-def test_merge_falls_back_to_conflict_markers_when_pipeline_raises(tmp_path):
+def test_merge_falls_back_to_conflict_markers_when_pipeline_raises(tmp_path, monkeypatch):
     """다른 모듈이 아직 스텁(NotImplementedError)이든, 뭐가 됐든 파이프라인이
     예외로 죽으면 조용히 "ours" 버전만 남기지 말고 표준 충돌 마커를 써야 한다."""
+    # chdir 없이 돌리면 repo_path="."가 이 프로젝트 자신이 되어, impact의
+    # baseline 전체-스위트 실행이 이 테스트 파일을 다시 만나 무한 재귀한다.
+    monkeypatch.chdir(tmp_path)
     base_file = tmp_path / "base.py"
     ours_file = tmp_path / "ours.py"
     theirs_file = tmp_path / "theirs.py"
