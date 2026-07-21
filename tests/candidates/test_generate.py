@@ -17,6 +17,71 @@ def _patch_llm(**kwargs):
     )
 
 
+# --- _call_llm: 디스크 캐싱 (무료 티어 요청 수 절약) --------------------------
+
+
+class _FakeResponse:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeModels:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_content(self, model, contents, config):
+        self.calls += 1
+        return _FakeResponse(f"response-{self.calls}")
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.models = _FakeModels()
+
+
+def test_call_llm_reuses_cached_response_for_identical_prompt(tmp_path, monkeypatch):
+    from weld.candidates import generate as gen
+
+    monkeypatch.chdir(tmp_path)
+    client = _FakeClient()
+
+    first = gen._call_llm(client, "same prompt", temperature=0.7)
+    second = gen._call_llm(client, "same prompt", temperature=0.7)
+
+    assert first == second
+    assert client.models.calls == 1  # 두 번째 호출은 캐시 히트라 API를 안 부름
+
+
+def test_call_llm_cache_miss_on_different_temperature(tmp_path, monkeypatch):
+    from weld.candidates import generate as gen
+
+    monkeypatch.chdir(tmp_path)
+    client = _FakeClient()
+
+    gen._call_llm(client, "same prompt", temperature=0.2)
+    gen._call_llm(client, "same prompt", temperature=0.9)
+
+    assert client.models.calls == 2  # temperature가 다르면 별개의 캐시 키
+
+
+def test_call_llm_persists_cache_across_calls(tmp_path, monkeypatch):
+    from weld.candidates import generate as gen
+
+    monkeypatch.chdir(tmp_path)
+    client_a = _FakeClient()
+    gen._call_llm(client_a, "prompt", temperature=0.5)
+
+    cache_file = tmp_path / ".weld_cache" / "llm_responses.json"
+    assert cache_file.exists()
+
+    # 새 client(=새 프로세스를 흉내)여도 디스크 캐시가 있으면 재호출 없이 재사용.
+    client_b = _FakeClient()
+    result = gen._call_llm(client_b, "prompt", temperature=0.5)
+
+    assert client_b.models.calls == 0
+    assert result == "response-1"
+
+
 # --- is_value_conflict ---------------------------------------------------
 
 
