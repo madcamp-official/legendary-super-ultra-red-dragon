@@ -21,11 +21,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from weld.langs import LanguageSpec, detect_language
 from weld.types import MergeCandidate, TestId, VerificationResult
 
 _WORKTREE_TIMEOUT_S = 30
 _COMPILE_TIMEOUT_S = 15
 _TEST_TIMEOUT_S = 120
+_LANG_BUILD_TIMEOUT_S = 60
 
 _TEST_RESULT_RE = re.compile(r"^(\S+::\S+)\s+(PASSED|FAILED|ERROR|SKIPPED)\b")
 
@@ -199,6 +201,50 @@ def _run_tests(
     return tests_run, tests_failed, tests_passed, error
 
 
+def _check_compiles_lang(worktree: Path, spec: LanguageSpec, file_path: str) -> tuple[bool, str | None]:
+    """비Python 언어 컴파일 게이트. build_command 있으면 빌드, 없으면(JS/TS) 문법 검사만."""
+    if spec.build_command is not None:
+        try:
+            result = _run(list(spec.build_command), cwd=worktree, timeout=_LANG_BUILD_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return False, "빌드 타임아웃"
+        if result.returncode != 0:
+            return False, (result.stderr or result.stdout).strip()
+        return True, None
+
+    if spec.name in ("javascript", "typescript"):
+        target = worktree / file_path
+        try:
+            result = _run(["node", "--check", str(target)], timeout=_COMPILE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return False, "문법 검사 타임아웃"
+        if result.returncode != 0:
+            return False, result.stderr.strip()
+        return True, None
+
+    return True, None
+
+
+def _run_tests_lang(
+    worktree: Path, spec: LanguageSpec
+) -> tuple[list[TestId], list[TestId], bool, str | None]:
+    """비Python 언어 테스트 게이트. 개별 테스트 ID 파싱 불가라 exit code + 스위트
+    표식 하나로 대신한다 (evaluation/multilang.py의 임시 로직과 동일 계약)."""
+    if spec.test_command is None:
+        return [], [], False, f"테스트 실행 방법을 모르는 언어: {spec.name}"
+
+    try:
+        result = _run(list(spec.test_command), cwd=worktree, timeout=_TEST_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return [], [], False, "테스트 실행 타임아웃"
+
+    marker = f"{spec.name}-full-suite"
+    passed = result.returncode == 0
+    if passed:
+        return [marker], [], True, None
+    return [marker], [marker], False, (result.stdout + result.stderr).strip()[-4000:]
+
+
 def run_in_sandbox(
     candidate: MergeCandidate, repo_path: str, tests: list[TestId] | None = None
 ) -> VerificationResult:
@@ -224,7 +270,13 @@ def run_in_sandbox(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(candidate.content)
 
-            compiled, compile_error = _check_compiles(worktree, candidate.file_path)
+            spec = detect_language(candidate.file_path) if candidate.file_path else None
+            is_python = spec is None or spec.name == "python"
+
+            if is_python:
+                compiled, compile_error = _check_compiles(worktree, candidate.file_path)
+            else:
+                compiled, compile_error = _check_compiles_lang(worktree, spec, candidate.file_path)
             if not compiled:
                 return VerificationResult(
                     candidate_id=candidate.id,
@@ -234,7 +286,11 @@ def run_in_sandbox(
                     error=compile_error,
                 )
 
-            tests_run, tests_failed, tests_passed, test_error = _run_tests(worktree, tests)
+            if is_python:
+                tests_run, tests_failed, tests_passed, test_error = _run_tests(worktree, tests)
+            else:
+                # 비Python은 pytest 노드 ID 개념이 없다 — tests 인자 무시하고 전체 스위트로 폴백.
+                tests_run, tests_failed, tests_passed, test_error = _run_tests_lang(worktree, spec)
             return VerificationResult(
                 candidate_id=candidate.id,
                 compiled=True,
