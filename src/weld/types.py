@@ -70,6 +70,14 @@ class MutationScore:
     mutants_killed: int
     survived_mutants: list[str] = field(default_factory=list)
     """생존한 뮤턴트 설명 문자열(예: "mutation.py:42 `<` -> `<=`"). 테스트 ID 아님."""
+    sites_total: int = 0
+    """`_collect_mutation_sites`가 찾은, 판정 여부와 무관한 원래 뮤테이션 사이트 개수.
+
+    mutants_total/mutants_killed는 "테스트가 실제로 그 줄을 지나간" 사이트만 센다
+    (그 외는 미커버로 스킵됨, verify/mutation.py 참고) — 그래서 mutants_total==0이
+    "변형할 코드가 애초에 없었다"(sites_total==0)는 뜻인지 "코드는 있는데 테스트가
+    전혀 못 봤다"(sites_total>0)는 뜻인지 이 필드 없이는 구분이 안 된다.
+    policy/trust.py가 이 둘을 다르게 판정하는 데 쓴다."""
 
     @property
     def score(self) -> float:

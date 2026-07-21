@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import configparser
 import dataclasses
+import difflib
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,25 @@ from weld.verify.mutation import compute_mutation_score
 from weld.verify.sandbox import run_candidates_parallel, run_in_sandbox
 
 MERGE_DRIVER_NAME = "weld"
+
+
+def _conflict_changed_lines(base: str, ours: str) -> set[int]:
+    """base 대비 ours가 바뀐 줄 번호(1-indexed) — 충돌 훙크 영역의 근사치.
+
+    테스트 선별(select_relevant_tests)은 후보(candidate)가 생기기도 전에
+    한 번만 돈다(mergiraf 가짜-충돌 조기 종료 경로가 후보 생성보다 먼저 이
+    결과를 필요로 하기 때문) — 그래서 후보별 정밀한 changed_lines 대신, 이
+    시점에 이미 갖고 있는 base/ours만으로 변경 영역을 근사한다. ours를 쓰는
+    이유는 select_relevant_tests의 baseline 커버리지가 지금 repo_path에
+    실제로 체크아웃돼 있는 파일(=ours)을 대상으로 측정되기 때문 — 다른
+    버전(theirs) 기준 줄 번호를 넘기면 baseline 매핑과 좌표계가 안 맞는다.
+    """
+    matcher = difflib.SequenceMatcher(a=base.splitlines(), b=ours.splitlines())
+    changed: set[int] = set()
+    for tag, _, _, b_start, b_end in matcher.get_opcodes():
+        if tag != "equal":
+            changed.update(range(b_start + 1, b_end + 1))
+    return changed
 
 
 @click.group()
@@ -58,7 +78,10 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
 
     try:
         changed_files = [path]
-        relevant_tests = select_relevant_tests(changed_files, repo_path=".")
+        changed_lines = {path: _conflict_changed_lines(base, ours)}
+        relevant_tests = select_relevant_tests(
+            changed_files, repo_path=".", changed_lines=changed_lines
+        )
 
         classification = classify_conflict(base, ours, theirs)
         if classification.is_spurious:
@@ -99,7 +122,7 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             verifications=verifications,
             mutation_scores=mutation_scores,
         )
-        click.echo(build_escalation_report(report), err=True)
+        click.echo(build_escalation_report(report, base), err=True)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 사람에게 안전하게 폴백해야 함
