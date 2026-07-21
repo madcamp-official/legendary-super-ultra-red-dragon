@@ -154,3 +154,123 @@ def test_build_or_load_graph_reparses_changed_file_only(tmp_path, monkeypatch):
     cg.build_or_load_graph(tmp_path, {"javascript"})
 
     assert calls == ["src/foo.js"]
+
+
+# --- C/C++ 테스트 파일 인식 (파일 이름/디렉터리 관례) ---
+
+
+def test_is_test_file_by_name():
+    for good in (
+        "tests/test_mean.c", "src/foo_test.c", "test-foo.cpp",
+        "test/mean.cc", "a/b/foo_unittest.cpp", "x_spec.cxx",
+    ):
+        assert cg._is_test_file_by_name(good), good
+    # 구분자 없는 test* 접두는 일부러 안 잡는다(latest/contest 오탐 방지).
+    for bad in ("src/mean.c", "lib/foo.cpp", "src/latest.c", "contest.c", "TestFoo.cpp"):
+        assert not cg._is_test_file_by_name(bad), bad
+
+
+@needs_ts
+def test_c_test_file_recognized_and_reaches_source(tmp_path):
+    """C는 함수 이름 컨벤션이 없어 파일 관례로 테스트를 인식한다 —
+    demo(tests/test_mean.c: main이 assert로 mean() 검증)와 같은 형태."""
+    _write(
+        tmp_path,
+        "src/mean.c",
+        "int mean(const int *xs, int n) {\n    return xs[0] / n;\n}\n",
+    )
+    _write(
+        tmp_path,
+        "tests/test_mean.c",
+        "#include <assert.h>\nint mean(const int *xs, int n);\n"
+        "int main(void) {\n    int a[] = {6};\n    assert(mean(a, 1) == 6);\n    return 0;\n}\n",
+    )
+
+    graph = cg.build_or_load_graph(tmp_path, {"c"})
+
+    # 테스트 파일 안의 함수(main)가 테스트 노드로 인식된다.
+    assert graph.test_nodes_by_lang.get("c") == {"tests/test_mean.c::main"}
+    # mean() 본문 줄에서 caller(main)를 타고 올라가 테스트에 도달.
+    reached = cg.find_reachable_tests(graph, "src/mean.c", 2)
+    assert reached == {"tests/test_mean.c::main"}
+
+
+@needs_ts
+def test_cpp_plain_test_file_recognized_alongside_macros(tmp_path):
+    """C++ 소박한 assert-in-main 테스트도 파일 관례로 인식(매크로 없이도)."""
+    _write(
+        tmp_path,
+        "src/mean.cpp",
+        "int mean(const int *xs, int n) {\n    return xs[0] / n;\n}\n",
+    )
+    _write(
+        tmp_path,
+        "tests/mean_test.cpp",
+        "#include <cassert>\nint mean(const int *xs, int n);\n"
+        "int main() {\n    int a[] = {6};\n    assert(mean(a, 1) == 6);\n    return 0;\n}\n",
+    )
+
+    graph = cg.build_or_load_graph(tmp_path, {"cpp"})
+
+    assert graph.test_nodes_by_lang.get("cpp") == {"tests/mean_test.cpp::main"}
+    assert cg.find_reachable_tests(graph, "src/mean.cpp", 2) == {"tests/mean_test.cpp::main"}
+
+
+# --- green-verify 배치 실행 ---
+
+
+def _two_js_test_files(tmp_path):
+    _write(tmp_path, "src/a.js", "function a() {\n    return 1;\n}\nmodule.exports = { a };\n")
+    _write(
+        tmp_path,
+        "src/a.test.js",
+        "const { a } = require('./a');\ntest('a', () => {\n    a();\n});\n",
+    )
+    _write(tmp_path, "src/b.js", "function b() {\n    return 2;\n}\nmodule.exports = { b };\n")
+    _write(
+        tmp_path,
+        "src/b.test.js",
+        "const { b } = require('./b');\ntest('b', () => {\n    b();\n});\n",
+    )
+    return cg.build_or_load_graph(tmp_path, {"javascript"})
+
+
+@needs_ts
+def test_verify_relevant_tests_runs_single_batch_when_all_green(tmp_path, monkeypatch):
+    graph = _two_js_test_files(tmp_path)
+    qnames = set(graph.test_nodes_by_lang["javascript"])
+    assert len(qnames) == 2
+
+    calls: list[list[str]] = []
+
+    def fake_run(repo_root, spec, rel_paths):
+        calls.append(list(rel_paths))
+        return True
+
+    monkeypatch.setattr(cg, "_run_tests", fake_run)
+
+    verified = cg.verify_relevant_tests(tmp_path, "javascript", graph, qnames)
+
+    assert verified == qnames
+    # 두 파일이 한 번의 배치로 함께 돈다(파일마다 한 번씩이 아니라).
+    assert len(calls) == 1
+    assert sorted(calls[0]) == ["src/a.test.js", "src/b.test.js"]
+
+
+@needs_ts
+def test_verify_relevant_tests_isolates_when_batch_fails(tmp_path, monkeypatch):
+    graph = _two_js_test_files(tmp_path)
+    qnames = set(graph.test_nodes_by_lang["javascript"])
+
+    def fake_run(repo_root, spec, rel_paths):
+        rel_paths = list(rel_paths)
+        if len(rel_paths) > 1:
+            return False  # 배치는 빨강 — 어느 파일 탓인지 모른다.
+        return rel_paths == ["src/a.test.js"]  # 격리: a만 초록, b는 빨강.
+
+    monkeypatch.setattr(cg, "_run_tests", fake_run)
+
+    verified = cg.verify_relevant_tests(tmp_path, "javascript", graph, qnames)
+
+    # b는 빨강이라 탈락, a만 남는다.
+    assert verified == {q for q in qnames if q.startswith("src/a.test.js")}
