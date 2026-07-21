@@ -525,9 +525,10 @@ def compute_mutation_score(
         보고 남은 뮤턴트를 안 돌린다. None이면 조기 종료 없음.
 
     다국어 라우팅: 후보 파일이 Python(.py)이 아니면 tree-sitter 기반 엔진
-    (verify/mutation_ts.py)으로 위임한다. relevant_tests는 pytest 노드 ID라
-    비Python 언어에는 의미가 없어 그쪽 엔진은 언어별 테스트 명령 전체를
-    돌린다. 공개 시그니처는 그대로라 호출부(cli.py 등)는 바뀌지 않는다.
+    (verify/mutation_ts.py)으로 위임한다. relevant_tests도 함께 넘겨,
+    그쪽 엔진이 관련 테스트만 도는 targeted 러너 명령(vitest run <파일> 등)을
+    만들 수 있게 한다 — 선별이 비었으면 전체 스위트로 폴백. 공개 시그니처는
+    그대로라 호출부(cli.py 등)는 바뀌지 않는다.
     """
     if candidate.file_path and not candidate.file_path.endswith(".py"):
         from weld.verify.mutation_ts import compute_mutation_score_ts
@@ -538,6 +539,7 @@ def compute_mutation_score(
             base_content=base_content,
             budget=budget,
             trust_threshold=trust_threshold,
+            relevant_tests=relevant_tests,
         )
 
     changed_lines = _changed_line_numbers(base_content, candidate.content)

@@ -225,8 +225,14 @@ def compute_mutation_score_ts(
     budget: int | None = None,
     trust_threshold: float | None = None,
     spec: LanguageSpec | None = None,
+    relevant_tests: list[str] | None = None,
 ) -> MutationScore:
     """비Python 후보의 변경 영역에 뮤턴트를 주입하고 언어별 테스트로 판정한다.
+
+    relevant_tests: 이 변경과 관련된 테스트 파일/노드ID 목록(impact 선별 결과).
+    주어지면 그 테스트만 도는 targeted 러너 명령을 쓴다 — 실제 저장소는 전체
+    스위트가 느리거나 무관한 브라우저/e2e 테스트로 baseline이 깨지므로 필수다.
+    없으면 전체 스위트로 폴백(작은 데모 저장소에선 그게 정상).
 
     verify/mutation.py의 compute_mutation_score와 같은 반환 계약. 신호를 만들
     수 없는 모든 경우(미지원 언어, tree-sitter 미설치, 테스트 명령 없음,
@@ -265,9 +271,10 @@ def compute_mutation_score_ts(
         _link_dependency_dir(Path(repo_path), tmp_repo, "node_modules")
         target_file = tmp_repo / candidate.file_path
 
-        # 저장소가 자기 러너를 선언했으면 그쪽에 위임한다(vitest 등). 데모/
-        # 픽스처처럼 package.json이 없으면 spec.test_command 그대로.
-        test_command = effective_test_command(spec, tmp_repo)
+        # 관련 테스트만 도는 targeted 명령(선별 있으면). 없으면 저장소 러너
+        # 위임 또는 정적 기본값. 실제 저장소는 전체 스위트가 느리거나 무관한
+        # 테스트로 baseline이 깨지므로 선별이 실용성의 관건.
+        test_command = effective_test_command(spec, tmp_repo, relevant_tests)
 
         # baseline: 원본 후보가 (빌드 포함) 초록이어야 "실패 = 뮤턴트를
         # 잡았다"가 성립한다.

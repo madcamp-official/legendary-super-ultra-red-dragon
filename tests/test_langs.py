@@ -31,3 +31,51 @@ def test_c_is_unaffected_by_resolver(tmp_path):
     """C는 이미 make(저장소 빌드시스템)에 위임하는 구조라 그대로."""
     spec = detect_language("src/foo.c")
     assert effective_test_command(spec, tmp_path) == ("make", "-s", "test")
+
+
+# --- selected_tests: targeted 러너 명령 ---
+
+
+def _pkg(tmp_path, test_script="vitest run", dev=("vitest",)):
+    (tmp_path / "package.json").write_text(json.dumps({
+        "scripts": {"test": test_script},
+        "devDependencies": {d: "*" for d in dev},
+    }))
+
+
+def test_targets_vitest_with_selected_files(tmp_path):
+    _pkg(tmp_path, "vitest run", ("vitest",))
+    spec = detect_language("lib/foo.js")
+    cmd = effective_test_command(spec, tmp_path, ["tests/foo.test.js"])
+    assert cmd == ("npx", "vitest", "run", "tests/foo.test.js")
+
+
+def test_targets_jest_with_selected_files(tmp_path):
+    _pkg(tmp_path, "jest", ("jest",))
+    spec = detect_language("lib/foo.js")
+    cmd = effective_test_command(spec, tmp_path, ["tests/foo.test.js", "tests/bar.test.js"])
+    assert cmd == ("npx", "jest", "tests/foo.test.js", "tests/bar.test.js")
+
+
+def test_selected_test_node_ids_reduce_to_files(tmp_path):
+    """'파일::케이스' 노드 ID여도 파일 경로만 뽑아 중복 제거."""
+    _pkg(tmp_path, "vitest run", ("vitest",))
+    spec = detect_language("lib/foo.js")
+    cmd = effective_test_command(
+        spec, tmp_path, ["tests/foo.test.js::a", "tests/foo.test.js::b"]
+    )
+    assert cmd == ("npx", "vitest", "run", "tests/foo.test.js")
+
+
+def test_selected_files_without_known_runner_use_node_test(tmp_path):
+    """러너를 못 알아내면 node --test로 그 파일만 지정."""
+    spec = detect_language("lib/foo.js")  # package.json 없음
+    cmd = effective_test_command(spec, tmp_path, ["tests/foo.test.js"])
+    assert cmd == ("node", "--test", "tests/foo.test.js")
+
+
+def test_empty_selection_falls_back_to_full_suite(tmp_path):
+    """빈 선별은 '관련 테스트 못 찾음' — 0개 실행(공허한 통과)보다 전체가 안전."""
+    _pkg(tmp_path, "vitest run", ("vitest",))
+    spec = detect_language("lib/foo.js")
+    assert effective_test_command(spec, tmp_path, []) == ("npm", "test")

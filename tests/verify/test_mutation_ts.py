@@ -125,14 +125,15 @@ def test_weak_tests_let_mutant_survive(tmp_path):
 @needs_ts
 @needs_node
 def test_dispatcher_routes_non_python_to_ts_engine(tmp_path):
-    """공개 API compute_mutation_score가 .js 후보를 TS 엔진으로 보낸다."""
+    """공개 API compute_mutation_score가 .js 후보를 TS 엔진으로 보내고,
+    relevant_tests(선별 결과)를 넘겨 그 파일만 도는 targeted 명령을 만든다."""
     repo = _make_repo(tmp_path, _STRONG_TESTS)
     candidate = MergeCandidate(id="c1", content=_CANDIDATE_JS, file_path="calc.js")
     score = compute_mutation_score(
-        candidate, relevant_tests=["무의미한-pytest-id"], repo_path=repo,
+        candidate, relevant_tests=["calc.test.js"], repo_path=repo,
         base_content=_BASE_JS,
     )
-    assert score.mutants_total >= 1  # pytest ID와 무관하게 node로 판정됨
+    assert score.mutants_total >= 1  # 선별된 테스트로 node가 판정
 
 
 def test_unknown_language_returns_no_signal(tmp_path):

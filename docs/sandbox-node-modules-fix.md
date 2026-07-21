@@ -32,11 +32,25 @@ from weld.langs import effective_test_command  # 신규
 cmd = effective_test_command(spec, worktree)   # worktree 루트를 넘긴다
 ```
 
-`effective_test_command(spec, repo_root)`의 동작:
-- 저장소 루트에 `package.json`이 있고 `scripts.test`가 정의돼 있으면 → `("npm","test")` (저장소 자신의 러너로 위임)
-- 없으면 → `spec.test_command` (데모/픽스처의 `node --test` 그대로)
+`effective_test_command(spec, repo_root, selected_tests=None)`의 동작:
+- **selected_tests(관련 테스트 파일/노드ID 목록)를 주면** → 그 파일만 도는 targeted 명령
+  (`npx vitest run <파일>` / `npx jest <파일>` / `node --test <파일>`, 러너는 package.json으로 감지).
+- selected_tests 없으면 → package.json에 test 스크립트 있으면 `("npm","test")`, 없으면 `spec.test_command`.
 
-즉 sandbox.py는 `spec.test_command`를 직접 쓰지 말고 **`effective_test_command(spec, worktree)`를 쓰면** 실제 저장소와 데모 둘 다 동작한다. `spec.build_command`(C/C++)는 그대로 둬도 된다.
+**중요 — 반드시 선별을 넘겨라**: 실측 결과 전체 스위트(`npm test`)는 실용성이 없다.
+실제 axios는 브라우저(Playwright) 테스트가 headless 환경에서 실패해 baseline이 깨지고,
+전체 실행이 60초+다. 반면 관련 테스트만 넘기면 `npx vitest run <파일>`로 4.3초에 8개
+뮤턴트를 판정한다(실측). 그러니 sandbox.py의 `_run_tests_lang`은:
+
+```python
+# tests 인자(select_relevant_tests 결과)를 그대로 넘긴다
+cmd = effective_test_command(spec, worktree, tests)
+```
+
+`tests`는 이미 `run_in_sandbox(candidate, repo_path, tests=...)`로 들어오는 그 목록이다
+(현재는 비Python이면 무시하는데, 이제 targeting에 써야 한다). `spec.build_command`(C/C++)는
+그대로 둬도 된다. 뮤테이션 쪽(verify/mutation_ts.py)은 내가 이미 relevant_tests를 받아
+targeted 명령을 만들도록 배선해뒀다 — sandbox.py도 같은 패턴으로 맞추면 된다.
 
 ## 검증 방법
 

@@ -104,29 +104,91 @@ def detect_language(file_path: str) -> LanguageSpec | None:
     return None
 
 
+# JS/TS에서 개별 파일을 지정 실행할 때 러너별 명령 형태.
+# 값은 (실행 프리픽스 튜플). 파일 인자는 이 뒤에 그대로 이어붙인다.
+_JS_RUNNER_TARGETED: dict[str, tuple[str, ...]] = {
+    "vitest": ("npx", "vitest", "run"),
+    "jest": ("npx", "jest"),
+    "mocha": ("npx", "mocha"),
+}
+
+
+def _detect_js_runner(repo_root: Path) -> str | None:
+    """저장소의 JS 테스트 러너 이름(vitest/jest/mocha). package.json의 test
+    스크립트와 의존성 목록에서 스니핑한다. 못 찾으면 None."""
+    pkg = repo_root / "package.json"
+    if not pkg.is_file():
+        return None
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    haystack = " ".join([
+        str((data.get("scripts") or {}).get("test", "")),
+        " ".join(data.get("devDependencies") or {}),
+        " ".join(data.get("dependencies") or {}),
+    ]).lower()
+    for runner in _JS_RUNNER_TARGETED:
+        if runner in haystack:
+            return runner
+    return None
+
+
+def _test_files(selected_tests: list[str]) -> list[str]:
+    """TestId 목록에서 파일 경로만 뽑아 순서 보존 중복 제거.
+
+    선별기가 "path/to/foo.test.js::caseName"처럼 노드 ID를 줄 수도, 파일 경로만
+    줄 수도 있어 "::" 앞부분만 취한다. vitest/jest는 파일 단위로 필터링하므로
+    파일 경로면 충분하다."""
+    files: list[str] = []
+    for t in selected_tests:
+        path = t.split("::", 1)[0]
+        if path and path not in files:
+            files.append(path)
+    return files
+
+
 def effective_test_command(
-    spec: LanguageSpec, repo_root: str | Path
+    spec: LanguageSpec,
+    repo_root: str | Path,
+    selected_tests: list[str] | None = None,
 ) -> tuple[str, ...] | None:
-    """실제 실행할 테스트 명령. 저장소가 자기 러너를 선언했으면 그쪽에 위임한다.
+    """실제 실행할 테스트 명령.
 
-    `spec.test_command`(예: JS의 `node --test`)는 데모/픽스처용 기본값이라,
-    실제 저장소(vitest/jest/mocha 등)에선 테스트를 못 돌린다. 그래서 저장소
-    루트에 `package.json`이 있고 `scripts.test`가 정의돼 있으면 `npm test`로
-    위임한다 — npm이 그 저장소가 설정한 진짜 러너를 호출한다. 없으면(데모
-    fixture 등) 정적 기본값을 그대로 쓴다.
+    selected_tests(관련 테스트 파일/노드ID 목록)가 주어지면 그 파일만 도는
+    **targeted 명령**을 만든다 — 실제 저장소는 전체 스위트가 느리거나(뮤턴트
+    마다 반복) 무관한 브라우저/e2e 테스트로 baseline이 깨지므로, 관련 테스트만
+    좁혀 돌려야 실용적이다. impact 선별 결과를 이 인자로 흘려주면 된다.
 
-    C/C++처럼 이미 저장소 빌드 시스템(`make`)에 위임하는 언어는 test_command
-    자체가 그 역할이라 그대로 반환된다. package.json 계열이 아닌 언어도 마찬가지.
+    selected_tests가 없으면(선별 불가/미구현) 저장소가 자기 러너를 선언한
+    경우 `npm test`로 위임하고(vitest/jest 자동 호출), 그것도 없으면 정적
+    기본값(데모 fixture의 `node --test`)을 쓴다.
+
+    C/C++처럼 이미 make(저장소 빌드시스템)에 위임하는 언어는 개별 테스트
+    타깃팅을 일반화하기 어려워 test_command를 그대로 반환한다.
     """
-    if spec.name in ("javascript", "typescript"):
-        pkg = Path(repo_root) / "package.json"
-        if pkg.is_file():
-            try:
-                scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
-            except (ValueError, OSError):
-                scripts = {}
-            if isinstance(scripts, dict) and scripts.get("test"):
-                return ("npm", "test")
+    repo_root = Path(repo_root)
+    if spec.name not in ("javascript", "typescript"):
+        return spec.test_command
+
+    files = _test_files(selected_tests) if selected_tests else []
+    if files:
+        runner = _detect_js_runner(repo_root)
+        if runner is not None:
+            return (*_JS_RUNNER_TARGETED[runner], *files)
+        # 러너를 못 알아냈지만 파일은 있음 → node --test로 그 파일만 지정.
+        return ("node", "--test", *files)
+
+    # 선별 없음(또는 빈 선별) — 전체 위임. 저장소가 test 스크립트를 선언했으면
+    # npm test, 아니면 정적 기본값.
+    pkg = repo_root / "package.json"
+    if pkg.is_file():
+        try:
+            scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
+        except (ValueError, OSError):
+            scripts = {}
+        if isinstance(scripts, dict) and scripts.get("test"):
+            return ("npm", "test")
     return spec.test_command
 
 
