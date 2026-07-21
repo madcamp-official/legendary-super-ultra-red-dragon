@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -35,7 +36,7 @@ from pathlib import Path
 from weld.candidates.generate import generate_candidates
 from weld.classify.mergiraf import classify_conflict
 from weld.evaluation.cases import EvalCase
-from weld.langs import detect_language
+from weld.langs import detect_language, effective_test_command
 from weld.policy.trust import decide_among
 from weld.types import MergeCandidate, MutationScore, VerificationResult
 from weld.verify.mutation import compute_mutation_score
@@ -86,6 +87,13 @@ def _verify_with_lang_tests(
             repo_path, repo,
             ignore=shutil.ignore_patterns(".git", "node_modules", ".venv"),
         )
+        # node_modules는 복사 제외하되 vitest/jest 실행 위해 심링크로 붙인다.
+        src_nm = Path(repo_path) / "node_modules"
+        if src_nm.exists():
+            try:
+                os.symlink(src_nm.resolve(), repo / "node_modules")
+            except OSError:
+                pass
         target = repo / candidate.file_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(candidate.content)
@@ -116,8 +124,8 @@ def _verify_with_lang_tests(
 
         try:
             result = subprocess.run(
-                list(spec.test_command), cwd=repo, capture_output=True, text=True,
-                timeout=_SUITE_TIMEOUT_S,
+                list(effective_test_command(spec, repo)), cwd=repo,
+                capture_output=True, text=True, timeout=_SUITE_TIMEOUT_S,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             return VerificationResult(

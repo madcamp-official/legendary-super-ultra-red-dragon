@@ -31,13 +31,14 @@ mutants_total==0 분기가 맡는다.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from weld.langs import LanguageSpec, detect_language
+from weld.langs import LanguageSpec, detect_language, effective_test_command
 from weld.types import MergeCandidate, MutationScore
 from weld.verify.mutation import (
     _MIN_SAMPLES_FOR_EARLY_STOP,
@@ -180,6 +181,23 @@ def _apply_splice(source: bytes, site: _SpliceSite) -> bytes:
     return source[: site.start_byte] + site.replacement + source[site.end_byte :]
 
 
+def _link_dependency_dir(src_repo: Path, dst_repo: Path, name: str) -> None:
+    """원본 저장소의 의존성 디렉터리(node_modules 등)를 격리본에 심링크한다.
+
+    node_modules는 수백 MB라 뮤턴트마다 복사하면 치명적이고, .gitignore·
+    copytree 제외로 격리본에 안 들어온다 — 그런데 vitest/jest가 실행되려면
+    있어야 하므로 심링크로 붙인다. 원본에 없거나(설치 안 됨) 이미 있으면
+    조용히 넘어간다(그 경우 테스트가 안 돌아 검증 실패로 정상 처리됨).
+    """
+    src = src_repo / name
+    dst = dst_repo / name
+    if src.exists() and not dst.exists():
+        try:
+            os.symlink(src.resolve(), dst)
+        except OSError:
+            pass
+
+
 def _run_language_tests(repo: Path, command: tuple[str, ...]) -> bool | None:
     """테스트 통과 여부. 타임아웃이면 None(판정 불가)."""
     try:
@@ -242,7 +260,14 @@ def compute_mutation_score_ts(
                 ".git", ".venv", "node_modules", "__pycache__", "target", "dist"
             ),
         )
+        # node_modules는 위에서 복사 제외(186MB 복사는 뮤턴트마다 하면 치명적)
+        # 하되, vitest/jest가 실행되려면 있어야 하므로 원본에서 심링크로 붙인다.
+        _link_dependency_dir(Path(repo_path), tmp_repo, "node_modules")
         target_file = tmp_repo / candidate.file_path
+
+        # 저장소가 자기 러너를 선언했으면 그쪽에 위임한다(vitest 등). 데모/
+        # 픽스처처럼 package.json이 없으면 spec.test_command 그대로.
+        test_command = effective_test_command(spec, tmp_repo)
 
         # baseline: 원본 후보가 (빌드 포함) 초록이어야 "실패 = 뮤턴트를
         # 잡았다"가 성립한다.
@@ -250,7 +275,7 @@ def compute_mutation_score_ts(
         if spec.build_command is not None:
             if _run_language_tests(tmp_repo, spec.build_command) is not True:
                 return _no_signal(candidate.id, sites_total=len(sites))
-        if _run_language_tests(tmp_repo, spec.test_command) is not True:
+        if _run_language_tests(tmp_repo, test_command) is not True:
             return _no_signal(candidate.id, sites_total=len(sites))
 
         for site in sites:
@@ -269,7 +294,7 @@ def compute_mutation_score_ts(
                     # 집계에서 제외한다. 테스트가 결함을 '잡은' 게 아니다.
                     continue
 
-            passed = _run_language_tests(tmp_repo, spec.test_command)
+            passed = _run_language_tests(tmp_repo, test_command)
             if passed is None:
                 continue  # 타임아웃 — 판정 불가, 집계 제외
 
