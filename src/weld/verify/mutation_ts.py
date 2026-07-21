@@ -74,10 +74,17 @@ _OPERATOR_KINDS = {
 }
 _STRING_NODE_TYPES = {"string", "template_string", "string_literal"}
 
-# 뮤테이션 대상에서 제외할 부모 노드 타입 — import 경로("./util.js" 등)를
-# 빈 문자열로 바꾸면 테스트가 코드 결함이 아니라 로드 실패로 죽어서,
-# "테스트가 결함을 잡았다"는 신호가 오염된다.
-_EXCLUDED_ANCESTOR_TYPES = {"import_statement", "import_declaration", "call_expression_import"}
+# 뮤테이션 대상에서 제외할 부모 노드 타입.
+# - import 계열: 경로 문자열을 비우면 테스트가 코드 결함이 아니라 로드
+#   실패로 죽어 신호가 오염된다.
+# - C/C++ 템플릿·전처리기: `vector<int>`의 `<`나 `#include <...>`를 뒤집으면
+#   유효한 결함이 아니라 컴파일 불능 코드가 된다 (빌드 게이트가 무효 처리로
+#   걸러주지만, 애초에 사이트로 안 잡는 게 예산 낭비가 없다).
+_EXCLUDED_ANCESTOR_TYPES = {
+    "import_statement", "import_declaration", "call_expression_import",
+    "template_argument_list", "template_parameter_list",
+    "preproc_include", "preproc_def", "preproc_function_def",
+}
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,8 @@ def _collect_splice_sites(
                 return
             text = node.type
             if text in _TOKEN_FLIPS:
+                if _has_excluded_ancestor(node):
+                    return
                 flipped = _TOKEN_FLIPS[text]
                 sites.append(_SpliceSite(
                     start_byte=node.start_byte, end_byte=node.end_byte,
@@ -235,8 +244,12 @@ def compute_mutation_score_ts(
         )
         target_file = tmp_repo / candidate.file_path
 
-        # baseline: 원본 후보가 초록이어야 "실패 = 뮤턴트를 잡았다"가 성립한다.
+        # baseline: 원본 후보가 (빌드 포함) 초록이어야 "실패 = 뮤턴트를
+        # 잡았다"가 성립한다.
         target_file.write_bytes(source)
+        if spec.build_command is not None:
+            if _run_language_tests(tmp_repo, spec.build_command) is not True:
+                return _no_signal(candidate.id, sites_total=len(sites))
         if _run_language_tests(tmp_repo, spec.test_command) is not True:
             return _no_signal(candidate.id, sites_total=len(sites))
 
@@ -245,8 +258,18 @@ def compute_mutation_score_ts(
                 break
 
             target_file.write_bytes(_apply_splice(source, site))
-            passed = _run_language_tests(tmp_repo, spec.test_command)
             runs += 1
+
+            if spec.build_command is not None:
+                built = _run_language_tests(tmp_repo, spec.build_command)
+                if built is None:
+                    continue  # 빌드 타임아웃 — 판정 불가, 집계 제외
+                if built is False:
+                    # 무효 뮤턴트(컴파일 불능) — kill로 세면 점수가 부풀려지므로
+                    # 집계에서 제외한다. 테스트가 결함을 '잡은' 게 아니다.
+                    continue
+
+            passed = _run_language_tests(tmp_repo, spec.test_command)
             if passed is None:
                 continue  # 타임아웃 — 판정 불가, 집계 제외
 

@@ -64,7 +64,19 @@ def _verify_with_lang_tests(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(candidate.content)
 
-        if spec.name in ("javascript", "typescript"):
+        # 컴파일 게이트: 빌드 명령이 있는 언어(C/C++ 등)는 빌드 성공을,
+        # JS/TS는 node --check 문법 검사를 컴파일 통과로 본다.
+        if spec.build_command is not None:
+            build = subprocess.run(
+                list(spec.build_command), cwd=repo, capture_output=True, text=True
+            )
+            if build.returncode != 0:
+                return VerificationResult(
+                    candidate_id=candidate.id, compiled=False, tests_passed=False,
+                    error=f"빌드 실패: {(build.stderr or build.stdout).strip()[:200]}",
+                    duration_s=time.monotonic() - start,
+                )
+        elif spec.name in ("javascript", "typescript"):
             check = subprocess.run(
                 ["node", "--check", str(target)], capture_output=True, text=True
             )
@@ -228,6 +240,43 @@ _JS_AGES_TESTS = textwrap.dedent("""\
     """)
 
 
+_C_MEAN = textwrap.dedent("""\
+    int mean(const int *xs, int n) {
+        if (n == 0) {
+            return 0;
+        }
+        int s = 0;
+        for (int i = 0; i < n; i++) {
+            s = s + xs[i];
+        }
+        return s / n;
+    }
+    """)
+
+_C_MEAN_TESTS = textwrap.dedent("""\
+    #include <assert.h>
+
+    int mean(const int *xs, int n);
+
+    int main(void) {
+        int a[] = {2, 4};
+        assert(mean(a, 2) == 3);
+        assert(mean(0, 0) == 0);
+        return 0;
+    }
+    """)
+
+_C_MAKEFILE = textwrap.dedent("""\
+    CC ?= cc
+    test_bin: src/mean.c tests/test_mean.c
+\t$(CC) -o test_bin src/mean.c tests/test_mean.c
+
+    .PHONY: test
+    test: test_bin
+\t./test_bin
+    """)
+
+
 def build_demo_repo(root: Path) -> None:
     (root / "src").mkdir(parents=True)
     (root / "tests").mkdir()
@@ -237,6 +286,11 @@ def build_demo_repo(root: Path) -> None:
     (root / "tests" / "math.test.js").write_text(_JS_MATH_TESTS)
     (root / "tests" / "stats.test.js").write_text(_JS_STATS_TESTS)
     (root / "tests" / "ages.test.js").write_text(_JS_AGES_TESTS)
+    # C 케이스 — node --test는 *.test.js만 보고, make는 C 파일만 봐서
+    # 한 데모 저장소에서 두 언어가 서로 간섭 없이 공존한다.
+    (root / "src" / "mean.c").write_text(_C_MEAN)
+    (root / "tests" / "test_mean.c").write_text(_C_MEAN_TESTS)
+    (root / "Makefile").write_text(_C_MAKEFILE)
 
 
 def demo_cases() -> list[EvalCase]:
@@ -268,7 +322,16 @@ def demo_cases() -> list[EvalCase]:
         ),
         ground_truth_resolution=j3_ours,
     )
-    return [j1, j2, j3]
+    c4_ours = _C_MEAN.replace("if (n == 0) {", "if (xs == 0 || n == 0) {")
+    c4 = EvalCase(
+        id="c-c4-real-strong-tests", file_path="src/mean.c", base=_C_MEAN,
+        ours=c4_ours,
+        theirs=_C_MEAN.replace("if (n == 0) {", "if (n <= 0) {"),
+        ground_truth_resolution=_C_MEAN.replace(
+            "if (n == 0) {", "if (xs == 0 || n <= 0) {"
+        ),
+    )
+    return [j1, j2, j3, c4]
 
 
 def main() -> None:

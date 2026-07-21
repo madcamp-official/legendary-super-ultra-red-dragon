@@ -32,6 +32,16 @@ class LanguageSpec:
     test_command: tuple[str, ...] | None
     """저장소 루트에서 전체 테스트를 실행하는 명령. None이면 실행 검증 불가
     (뮤테이션 엔진이 신호 없음으로 폴백한다)."""
+    build_command: tuple[str, ...] | None = None
+    """컴파일 언어용 빌드 명령 (테스트 실행과 분리). 있으면 뮤테이션 엔진이
+    뮤턴트마다 먼저 빌드하고, 빌드 실패는 '무효 뮤턴트'로 집계에서 제외한다
+    (kill로 세면 점수가 부풀려짐 — C++ 템플릿 `<` 반전처럼 컴파일 자체가
+    깨지는 변형의 안전망). 빌드/테스트 실패를 구분해야 하므로 test_command에
+    빌드를 섞지 말 것.
+
+    주의(make 사용 시): macOS 기본 GNU make 3.81은 mtime을 초 단위로만
+    비교해서, 뮤테이션처럼 1초 안에 파일을 바꾸면 재빌드를 건너뛰고 낡은
+    바이너리를 실행한다(가짜 생존). 반드시 -B(무조건 재빌드)를 포함할 것."""
 
 
 _LANGUAGES: tuple[LanguageSpec, ...] = (
@@ -53,8 +63,25 @@ _LANGUAGES: tuple[LanguageSpec, ...] = (
         name="typescript",
         extensions=(".ts", ".mts", ".cts"),
         ts_language="typescript",
-        # Node 22.6+는 --experimental-strip-types로 ts 테스트 직접 실행 가능.
-        test_command=("node", "--test", "--experimental-strip-types"),
+        # Node 23+는 타입 스트리핑이 기본이라 플래그 없이 .ts를 직접 실행한다
+        # (node 26에서 실측 확인).
+        test_command=("node", "--test"),
+    ),
+    # C/C++ 규약: 저장소 루트 Makefile의 기본 타깃이 테스트 바이너리를 빌드하고,
+    # `test` 타깃이 그것을 실행한다. -B는 build_command docstring의 mtime 함정 참고.
+    LanguageSpec(
+        name="c",
+        extensions=(".c",),
+        ts_language="c",
+        test_command=("make", "-s", "test"),
+        build_command=("make", "-s", "-B"),
+    ),
+    LanguageSpec(
+        name="cpp",
+        extensions=(".cpp", ".cc", ".cxx", ".hpp", ".hh", ".h"),
+        ts_language="cpp",
+        test_command=("make", "-s", "test"),
+        build_command=("make", "-s", "-B"),
     ),
     # 아래 언어들은 mergiraf 분류 + tree-sitter 뮤테이션 사이트 수집까지는
     # 되지만, 이 머신에 런타임이 없어 테스트 실행(kill 판정)은 불가 —
