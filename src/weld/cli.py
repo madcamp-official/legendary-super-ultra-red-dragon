@@ -101,7 +101,7 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
 
         candidates = [
             dataclasses.replace(c, file_path=path)
-            for c in generate_candidates(base, ours, theirs)
+            for c in generate_candidates(base, ours, theirs, file_path=path)
         ]
         verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
         mutation_scores = [

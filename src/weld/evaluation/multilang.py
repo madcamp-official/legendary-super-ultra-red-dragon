@@ -163,7 +163,7 @@ def run_case(case: EvalCase, repo_path: str) -> dict:
 
     candidates = [
         dataclasses.replace(c, file_path=case.file_path)
-        for c in generate_candidates(case.base, case.ours, case.theirs, n=2)
+        for c in generate_candidates(case.base, case.ours, case.theirs, n=2, file_path=case.file_path)
     ]
     rec["path"] = rec.get("path", "") + ("+" if cls.is_spurious else "") + "llm-pipeline"
     rec["candidates"] = []

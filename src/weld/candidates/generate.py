@@ -39,6 +39,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+from weld.langs import detect_language
 from weld.types import MergeCandidate
 
 load_dotenv()
@@ -52,6 +53,7 @@ _CANDIDATE_TEMPERATURES = [0.2, 0.7, 1.1, 1.4, 1.7]
 _HUNK_PROMPT_TEMPLATE = """다음은 git 3-way 병합에서 실제로 충돌한 코드 조각(훙크) \
 하나다. base는 공통 조상, ours와 theirs는 각각 여기서 갈라져 나온 두 버전이다. \
 파일의 나머지 부분은 이미 자동으로 병합됐고, 이 조각만 사람(너)이 판단해야 한다.
+{language_line}
 
 --- base (이 조각의 공통 조상) ---
 {base}
@@ -193,15 +195,35 @@ def _normalize_hunk_output(resolved: str, hunk: _ConflictHunk) -> str:
     return resolved
 
 
-def _resolve_hunk(client: genai.Client, hunk: _ConflictHunk, temperature: float) -> str:
+def _language_line(file_path: str | None) -> str:
+    """훙크 프롬프트에 끼워 넣을 언어 힌트 한 줄. 모르는 확장자/경로 없으면 빈 문자열."""
+    if not file_path:
+        return ""
+    spec = detect_language(file_path)
+    if spec is None:
+        return ""
+    return f"이 코드는 {spec.name} 언어다. 문법과 관용구를 이 언어 기준으로 판단하라.\n"
+
+
+def _resolve_hunk(
+    client: genai.Client, hunk: _ConflictHunk, temperature: float, language_line: str = ""
+) -> str:
     ours_hunk, base_hunk, theirs_hunk = hunk
-    prompt = _HUNK_PROMPT_TEMPLATE.format(base=base_hunk, ours=ours_hunk, theirs=theirs_hunk)
+    prompt = _HUNK_PROMPT_TEMPLATE.format(
+        base=base_hunk, ours=ours_hunk, theirs=theirs_hunk, language_line=language_line
+    )
     resolved = _call_llm(client, prompt, temperature=temperature)
     return _normalize_hunk_output(resolved, hunk)
 
 
-def generate_candidates(base: str, ours: str, theirs: str, n: int = 3) -> list[MergeCandidate]:
-    """3-way 충돌에 대해 후보 n개를 생성한다."""
+def generate_candidates(
+    base: str, ours: str, theirs: str, n: int = 3, file_path: str | None = None
+) -> list[MergeCandidate]:
+    """3-way 충돌에 대해 후보 n개를 생성한다.
+
+    file_path가 주어지면 확장자로 언어를 판별해(langs.detect_language) LLM
+    프롬프트에 알려준다 — 안 주면 LLM이 코드 내용만 보고 언어를 추측해야 한다.
+    """
     if is_value_conflict(base, ours, theirs):
         candidates = [
             MergeCandidate(id="c-0", content=ours, strategy="ours-verbatim"),
@@ -219,11 +241,12 @@ def generate_candidates(base: str, ours: str, theirs: str, n: int = 3) -> list[M
 
     client = _build_client()
     temperatures = _CANDIDATE_TEMPERATURES[:n]
+    language_line = _language_line(file_path)
 
     with ThreadPoolExecutor(max_workers=max(1, len(conflict_positions) * len(temperatures))) as pool:
         futures = {
             (pos, cand_i): pool.submit(
-                _resolve_hunk, client, segments[pos], temperatures[cand_i]  # type: ignore[arg-type]
+                _resolve_hunk, client, segments[pos], temperatures[cand_i], language_line  # type: ignore[arg-type]
             )
             for pos in conflict_positions
             for cand_i in range(len(temperatures))

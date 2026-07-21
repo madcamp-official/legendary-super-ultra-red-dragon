@@ -41,7 +41,7 @@ def run_case(case: EvalCase, repo_path: str) -> EvalOutcome:
 
         candidates = [
             dataclasses.replace(c, file_path=case.file_path)
-            for c in generate_candidates(case.base, case.ours, case.theirs)
+            for c in generate_candidates(case.base, case.ours, case.theirs, file_path=case.file_path)
         ]
         relevant_tests = case.relevant_tests or select_relevant_tests(
             [case.file_path], repo_path=repo_path
