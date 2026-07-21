@@ -32,8 +32,12 @@ os.chdir(WELD)  # .env / .weld_cache가 여기 기준
 from weld.candidates.generate import generate_candidates  # noqa: E402
 from weld.classify.mergiraf import classify_conflict  # noqa: E402
 
-DATASET = f"{WELD}/datasets/llm_required_merges.jsonl"
-OUT = f"{WELD}/results/overnight-0721/track_a.jsonl"
+DATASET = os.environ.get(
+    "TRACK_A_DATASET", f"{WELD}/datasets/llm_required_merges.jsonl"
+)
+OUT = os.environ.get(
+    "TRACK_A_OUT", f"{WELD}/results/overnight-0721/track_a.jsonl"
+)
 LLM_HOST, LLM_PORT = "172.10.7.246", 443
 
 
