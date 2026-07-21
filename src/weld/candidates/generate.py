@@ -58,9 +58,20 @@ _DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 _LLM_CACHE_VERSION = 1
 _LLM_CACHE_LOCK = threading.Lock()
 
-# 후보 개수만큼 앞에서부터 잘라 쓴다. 온도를 낮은 값부터 배치해 첫 후보(c-0)는
-# 비교적 보수적이고, 뒤로 갈수록 다른 해석을 더 적극적으로 탐색하게 한다.
-_CANDIDATE_TEMPERATURES = [0.2, 0.7, 1.1, 1.4, 1.7]
+# 후보 다양성은 훙크당 병렬 호출마다 다른 temperature를 줘서 유도하므로,
+# 온도끼리 가까우면 후보들이 사실상 같은 답으로 수렴해 중복 후보(뒤에서
+# _dedupe_candidates가 걸러내는 대상)가 나오기 쉽다. 그래서 앞에서부터 순서대로
+# 자르는 대신 [_TEMP_LOW, _TEMP_HIGH] 구간에 n개를 최대한 넓게 펼친다 — 특히
+# n=2(현재 기본값)일 때 두 후보가 양 끝 온도를 써서 가장 크게 갈리도록 한다.
+_TEMP_LOW = 0.2
+_TEMP_HIGH = 1.7
+
+
+def _spread_temperatures(n: int) -> list[float]:
+    if n <= 1:
+        return [_TEMP_LOW]
+    step = (_TEMP_HIGH - _TEMP_LOW) / (n - 1)
+    return [round(_TEMP_LOW + step * i, 2) for i in range(n)]
 
 _HUNK_PROMPT_TEMPLATE = """다음은 git 3-way 병합에서 실제로 충돌한 코드 조각(훙크) \
 하나다. base는 공통 조상, ours와 theirs는 각각 여기서 갈라져 나온 두 버전이다. \
@@ -278,20 +289,42 @@ def _resolve_hunk(
     return _normalize_hunk_output(resolved, hunk)
 
 
+def _dedupe_candidates(candidates: list[MergeCandidate]) -> list[MergeCandidate]:
+    """content가 완전히 같은 후보는 뒤엣것을 버린다(순서 유지, 첫 등장만 남김).
+
+    서로 다른 temperature로 뽑아도 LLM이 같은 결론에 수렴하면 후보들이
+    말 그대로 동일한 파일 내용이 된다 — 검증/뮤테이션을 여러 벌 도는 게
+    낭비이므로, 어차피 하나로 취급될 후보는 하나만 남겨 그 하나만 테스트한다.
+    """
+    seen: set[str] = set()
+    unique: list[MergeCandidate] = []
+    for c in candidates:
+        if c.content in seen:
+            continue
+        seen.add(c.content)
+        unique.append(c)
+    return unique
+
+
 def generate_candidates(
-    base: str, ours: str, theirs: str, n: int = 3, file_path: str | None = None
+    base: str, ours: str, theirs: str, n: int = 2, file_path: str | None = None
 ) -> list[MergeCandidate]:
-    """3-way 충돌에 대해 후보 n개를 생성한다.
+    """3-way 충돌에 대해 후보를 최대 n개 생성한다.
 
     file_path가 주어지면 확장자로 언어를 판별해(langs.detect_language) LLM
     프롬프트에 알려준다 — 안 주면 LLM이 코드 내용만 보고 언어를 추측해야 한다.
+
+    n개를 다 채우는 게 아니라 "최대 n개"인 이유: 서로 다른 temperature로
+    생성해도 결과 내용이 완전히 같아지는 경우 _dedupe_candidates가 중복을
+    걸러내므로, 반환 개수가 n보다 적을 수 있다(그만큼 검증/뮤테이션 비용도
+    준다).
     """
     if is_value_conflict(base, ours, theirs):
         candidates = [
             MergeCandidate(id="c-0", content=ours, strategy="ours-verbatim"),
             MergeCandidate(id="c-1", content=theirs, strategy="theirs-verbatim"),
         ]
-        return candidates[:n]
+        return _dedupe_candidates(candidates[:n])
 
     segments = _split_diff3_segments(_diff3_merge(base, ours, theirs))
     conflict_positions = [i for i, seg in enumerate(segments) if isinstance(seg, tuple)]
@@ -302,7 +335,7 @@ def generate_candidates(
         return [MergeCandidate(id="c-0", content=merged, strategy="diff3-verbatim")][: max(n, 1)]
 
     client = _build_client()
-    temperatures = _CANDIDATE_TEMPERATURES[:n]
+    temperatures = _spread_temperatures(n)
     language_line = _language_line(file_path)
 
     with ThreadPoolExecutor(max_workers=max(1, len(conflict_positions) * len(temperatures))) as pool:
@@ -325,4 +358,4 @@ def generate_candidates(
         candidates.append(
             MergeCandidate(id=f"c-{cand_i}", content=content, strategy=f"llm-hunk-t{temperature}")
         )
-    return candidates
+    return _dedupe_candidates(candidates)

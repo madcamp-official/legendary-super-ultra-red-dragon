@@ -4,7 +4,10 @@ from unittest.mock import patch
 import pytest
 
 from weld.candidates.generate import (
+    _TEMP_HIGH,
+    _TEMP_LOW,
     _normalize_hunk_output,
+    _spread_temperatures,
     generate_candidates,
     is_value_conflict,
 )
@@ -15,6 +18,12 @@ def _patch_llm(**kwargs):
         patch("weld.candidates.generate._build_client", return_value=None),
         patch("weld.candidates.generate._call_llm", **kwargs),
     )
+
+
+def _distinct_by_temperature(client, prompt, temperature=0.7):
+    """온도별로 서로 다른 응답을 내는 가짜 LLM — 후보들이 실제로 갈릴 때의
+    동작(개수/고유성)을 테스트하려면 응답이 겹치면 안 되므로 이걸 쓴다."""
+    return f"merged-{temperature}\n"
 
 
 # --- _call_llm: 디스크 캐싱 (무료 티어 요청 수 절약) --------------------------
@@ -193,14 +202,21 @@ def _multiline_conflict():
 
 
 def test_generate_candidates_returns_requested_count():
-    build, call = _patch_llm(return_value="merged\n")
+    build, call = _patch_llm(side_effect=_distinct_by_temperature)
     with build, call:
         candidates = generate_candidates(*_multiline_conflict(), n=2)
     assert len(candidates) == 2
 
 
+def test_generate_candidates_default_n_is_two():
+    build, call = _patch_llm(side_effect=_distinct_by_temperature)
+    with build, call:
+        candidates = generate_candidates(*_multiline_conflict())
+    assert len(candidates) == 2
+
+
 def test_generate_candidates_ids_are_unique():
-    build, call = _patch_llm(return_value="merged\n")
+    build, call = _patch_llm(side_effect=_distinct_by_temperature)
     with build, call:
         candidates = generate_candidates(*_multiline_conflict())
     ids = [c.id for c in candidates]
@@ -208,12 +224,52 @@ def test_generate_candidates_ids_are_unique():
 
 
 def test_generate_candidates_strategies_carry_distinct_temperatures():
-    build, call = _patch_llm(return_value="merged\n")
+    build, call = _patch_llm(side_effect=_distinct_by_temperature)
     with build, call:
         candidates = generate_candidates(*_multiline_conflict(), n=3)
     strategies = {c.strategy for c in candidates}
     assert len(strategies) == 3
     assert all(s.startswith("llm-hunk-t") for s in strategies)
+
+
+# --- generate_candidates: 중복 후보 제거 ------------------------------------
+
+
+def test_generate_candidates_dedupes_identical_content():
+    """서로 다른 temperature로 뽑아도 결과가 완전히 같은 내용으로 수렴하면
+    하나만 남기고 나머지는 버려 검증/뮤테이션을 중복으로 안 돌린다."""
+    build, call = _patch_llm(return_value="SAME\n")
+    with build, call:
+        candidates = generate_candidates(*_multiline_conflict(), n=2)
+    assert len(candidates) == 1
+
+
+def test_generate_candidates_keeps_distinct_content():
+    build, call = _patch_llm(side_effect=_distinct_by_temperature)
+    with build, call:
+        candidates = generate_candidates(*_multiline_conflict(), n=2)
+    contents = {c.content for c in candidates}
+    assert len(contents) == 2
+
+
+# --- _spread_temperatures ---------------------------------------------------
+
+
+def test_spread_temperatures_single_value_uses_low():
+    assert _spread_temperatures(1) == [_TEMP_LOW]
+
+
+def test_spread_temperatures_two_values_maximize_gap():
+    # n=2(현재 기본값)일 때 후보 다양성을 최대화하려면 구간 양 끝을 써야 한다.
+    assert _spread_temperatures(2) == [_TEMP_LOW, _TEMP_HIGH]
+
+
+def test_spread_temperatures_evenly_spaced():
+    values = _spread_temperatures(3)
+    assert values[0] == _TEMP_LOW
+    assert values[-1] == _TEMP_HIGH
+    assert len(values) == 3
+    assert len(set(values)) == 3  # 전부 서로 다른 온도
 
 
 def test_generate_candidates_splices_hunk_resolution_into_surrounding_text():
