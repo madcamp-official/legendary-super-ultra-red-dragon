@@ -15,6 +15,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "coverage>=7.0",
     "pyyaml>=6.0",
+    # 다국어 뮤테이션 엔진(verify/mutation_ts.py)용. 미설치 시 엔진은 '신호
+    # 없음'으로 폴백해 Python 전용으로 동작하지만, JS/TS/C/C++ 뮤테이션을
+    # 기본 제공하려면 필요하다. language-pack이 tree-sitter 코어를 끌어온다.
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=1.10",
 ]
 
 [project.optional-dependencies]
