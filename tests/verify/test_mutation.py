@@ -222,13 +222,22 @@ def test_prioritize_sites_puts_weakly_covered_lines_first():
     assert linenos[0] == 3  # 제일 약하게 커버된 줄이 먼저
 
 
-def test_prioritize_sites_drops_zero_coverage_sites():
+def test_prioritize_sites_moves_zero_coverage_sites_last():
+    """0커버 사이트는 버리지 않고 맨 뒤로 보낸다.
+
+    per-test 동적 컨텍스트 귀속은 모듈 상수처럼 import 시점에 실행되는 줄을
+    놓친다(효과는 테스트에 보이는데 귀속만 0). 실제 커버 여부는 뮤턴트 실행
+    시 실측 executed 체크가 판정하므로, 여기서 미리 버리면 그 기회가 사라져
+    "사이트 있음+뮤턴트 0"으로 근거 없는 에스컬레이션이 된다(값충돌 실측)."""
     source = "def f(a, b):\n    x = a < b\n    y = a > b\n"
     tree = ast.parse(source)
     sites = _collect_mutation_sites(tree, changed_lines={2, 3})
-    line_coverage = {2: 1, 3: 0}  # 3번 줄은 어떤 테스트도 안 지나감
+    line_coverage = {2: 1, 3: 0}  # 3번 줄은 per-test 귀속이 안 잡음
     ordered = _prioritize_sites(sites, line_coverage)
-    assert all(s.lineno == 2 for s in ordered)
+    assert len(ordered) == len(sites)  # 하나도 안 버림
+    n_covered = sum(1 for s in sites if s.lineno == 2)
+    assert all(s.lineno == 2 for s in ordered[:n_covered])  # 커버된 줄 먼저
+    assert all(s.lineno == 3 for s in ordered[n_covered:])  # 0커버는 맨 뒤
 
 
 def test_prioritize_sites_falls_back_when_profiling_empty():

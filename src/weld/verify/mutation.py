@@ -505,14 +505,23 @@ def _run_tests_with_coverage(
 def _prioritize_sites(
     sites: list[_MutationSite], line_coverage: dict[int, int]
 ) -> list[_MutationSite]:
-    """약한 영역 우선 배분: 프로파일링이 성공했으면 0커버 사이트를 버리고
-    약하게 커버된(테스트 수 적은) 줄부터 오도록 정렬한다. 프로파일링이
-    쓸모 있는 데이터를 못 냈으면(전부 0) 원래 순서 그대로 둔다(안전한 폴백)."""
+    """약한 영역 우선 배분: 약하게 커버된(테스트 수 적은) 줄부터, 0커버 줄은
+    맨 뒤로. 프로파일링이 쓸모 있는 데이터를 못 냈으면(전부 0) 원래 순서
+    그대로 둔다(안전한 폴백).
+
+    0커버 사이트를 버리지 않고 뒤로 미루는 이유: per-test 동적 컨텍스트
+    귀속은 모듈 레벨 상수처럼 import 시점에 실행되는 줄을 놓친다(테스트가
+    값의 *효과*는 보는데 줄 실행은 귀속 안 됨 — py-m2 값충돌 실측 사례:
+    사이트 3개 전부 드랍 → mutants 0 → 근거 없이 에스컬레이션). 실제 판정은
+    뮤턴트 실행 시 _run_tests_with_coverage의 실측 executed 체크가 하므로,
+    진짜 미커버 뮤턴트는 여전히 'uncovered'로 집계에서 빠진다 — 여기서
+    미리 버리면 그 실측 기회 자체가 사라진다."""
     if not line_coverage or not any(count > 0 for count in line_coverage.values()):
         return sites
     covered = [s for s in sites if line_coverage.get(s.lineno, 0) > 0]
     covered.sort(key=lambda s: line_coverage.get(s.lineno, 0))
-    return covered
+    zero = [s for s in sites if line_coverage.get(s.lineno, 0) == 0]
+    return covered + zero
 
 
 def compute_mutation_score(

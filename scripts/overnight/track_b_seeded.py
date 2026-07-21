@@ -255,6 +255,9 @@ def py_seeds() -> list[Seed]:
                 assert clamp(0, 0, 10) == 0
                 assert clamp(10, 0, 10) == 10
 
+            def test_point_range():
+                assert clamp(5, 5, 5) == 5
+
             def test_bad_range():
                 with pytest.raises(ValueError, match="bad range"):
                     clamp(1, 5, 2)
@@ -466,6 +469,7 @@ def js_seeds() -> list[Seed]:
               assert.strictEqual(clamp(0, 0, 10), 0);
               assert.strictEqual(clamp(10, 0, 10), 10);
             });
+            test('point range', () => { assert.strictEqual(clamp(5, 5, 5), 5); });
             test('bad range', () => { assert.throws(() => clamp(1, 5, 2), /bad range/); });
             """)},
     ))
@@ -692,6 +696,7 @@ def c_seeds() -> list[Seed]:
                 assert(clamp_c(11, 0, 10) == 10);
                 assert(clamp_c(0, 0, 10) == 0);
                 assert(clamp_c(10, 0, 10) == 10);
+                assert(clamp_c(5, 5, 5) == 5);
                 assert(clamp_c(1, 5, 2) == -1);
                 return 0;
             }
@@ -915,6 +920,7 @@ def cpp_seeds() -> list[Seed]:
                 assert(clamp_xx(11, 0, 10) == 10);
                 assert(clamp_xx(0, 0, 10) == 0);
                 assert(clamp_xx(10, 0, 10) == 10);
+                assert(clamp_xx(5, 5, 5) == 5);
                 assert(clamp_xx(1, 5, 2) == -1);
                 return 0;
             }
