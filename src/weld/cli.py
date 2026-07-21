@@ -83,7 +83,7 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             changed_files, repo_path=".", changed_lines=changed_lines
         )
 
-        classification = classify_conflict(base, ours, theirs)
+        classification = classify_conflict(base, ours, theirs, file_path=path)
         if classification.is_spurious:
             spurious_candidate = MergeCandidate(
                 id="mergiraf-spurious",
