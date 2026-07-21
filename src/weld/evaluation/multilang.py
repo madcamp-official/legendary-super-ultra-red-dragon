@@ -179,8 +179,12 @@ def run_case(case: EvalCase, repo_path: str) -> dict:
     mutations: list[MutationScore] = []
     for c in candidates:
         v = _verify_with_lang_tests(c, repo_path)
+        # relevant_tests=None → 선별 없이 전체 스위트로 뮤테이션(데모는 소형
+        # 저장소라 이게 정상). 예전엔 "full-suite" 문자열을 센티넬로 넘겼는데,
+        # 이제 mutation_ts가 그걸 effective_test_command로 넘겨 파일명으로
+        # 오해(node --test full-suite → 없는 파일 → baseline 붕괴)하므로 None을 쓴다.
         m = compute_mutation_score(
-            c, relevant_tests=["full-suite"], repo_path=repo_path,
+            c, relevant_tests=None, repo_path=repo_path,
             base_content=case.base, budget=12, trust_threshold=0.8,
         )
         verifications.append(v)
