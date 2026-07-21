@@ -11,8 +11,12 @@
   - verify/mutation_ts.py → tree-sitter 문법 이름 + 테스트 실행 명령
   - evaluation/multilang.py → 언어별 E2E 하네스
 
-주의: 팀원 파트(verify/sandbox.py의 pytest 실행, verify/impact.py의 coverage
-선별)는 아직 Python 전용이다. 비Python 언어의 검증·테스트 선별은 당분간
+주의: 팀원 파트 중 verify/sandbox.py의 테스트 "실행"은 아직 Python
+전용이다(비Python은 test_command 전체 스위트만 돎, 개별 테스트 실행 불가).
+반면 verify/impact.py의 테스트 "선별"은 python(coverage 엔진) +
+그 외 ts_language 있는 언어(verify/callgraph.py의 tree-sitter call graph +
+RTA 엔진)로 전부 커버한다 — 선별 결과가 아직 sandbox.py 실행에는 안 쓰일
+뿐, 선별 자체는 다국어다. 비Python 언어의 E2E 검증은 당분간
 evaluation/multilang.py의 자체 러너(test_command 전체 실행)로 대신한다.
 """
 
