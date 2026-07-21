@@ -98,10 +98,16 @@ def _build_client() -> genai.Client:
 
 
 def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> str:
+    # thinking_budget=0: 추론(thinking) 토큰 생성을 끈다. 이 토큰들은 응답에 안
+    # 보이지만 출력 토큰으로 과금돼 비용이 폭증하는 원인 — 훙크 병합 해결은 무거운
+    # 추론이 필요 없으므로 끈다. (2026-07-21, 대량 평가 중 예상 밖 과금으로 확인)
     response = client.models.generate_content(
         model=_DEFAULT_MODEL,
         contents=prompt,
-        config=types.GenerateContentConfig(temperature=temperature),
+        config=types.GenerateContentConfig(
+            temperature=temperature,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
     )
     return (response.text or "").strip()
 
