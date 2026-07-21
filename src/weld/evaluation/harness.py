@@ -19,7 +19,7 @@ from weld.classify.mergiraf import classify_conflict
 from weld.evaluation.cases import EvalCase, EvalOutcome
 from weld.policy.trust import decide_among
 from weld.verify.impact import select_relevant_tests
-from weld.verify.mutation import compute_mutation_score
+from weld.verify.mutation import compute_mutation_scores_parallel
 from weld.verify.sandbox import run_candidates_parallel
 
 
@@ -49,10 +49,9 @@ def run_case(case: EvalCase, repo_path: str) -> EvalOutcome:
         verifications = run_candidates_parallel(
             candidates, repo_path=repo_path, tests=relevant_tests
         )
-        mutation_scores = [
-            compute_mutation_score(c, relevant_tests, repo_path=repo_path, base_content=case.base)
-            for c in candidates
-        ]
+        mutation_scores = compute_mutation_scores_parallel(
+            candidates, relevant_tests, repo_path=repo_path, base_content=case.base
+        )
 
         decision = decide_among(candidates, verifications, mutation_scores)
         if decision.accepted:

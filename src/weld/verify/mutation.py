@@ -655,3 +655,44 @@ def compute_mutation_score(
         sites_total=sites_total,
         mutants_uncovered=uncovered,
     )
+
+
+def compute_mutation_scores_parallel(
+    candidates: list[MergeCandidate],
+    relevant_tests: list[TestId],
+    repo_path: str,
+    base_content: str = "",
+    *,
+    budget: int | None = None,
+    trust_threshold: float | None = None,
+) -> list[MutationScore]:
+    """여러 후보의 뮤테이션 점수를 **후보 단위 병렬**로 계산한다(입력 순서 보존).
+
+    검증(run_candidates_parallel)은 이미 후보 병렬인데 뮤테이션만 순차라, 후보가
+    여럿이면 그만큼 벽시계가 길어졌다. 후보끼리 독립이라 동시에 돌린다.
+
+    주의(중첩 병렬): compute_mutation_score는 내부적으로 뮤턴트를 워커로 병렬
+    실행하므로, 여기서 후보를 또 병렬화하면 (후보 병렬도 × 뮤턴트 워커)만큼
+    동시 테스트 프로세스가 뜬다. CPU 오버섭스크립션을 막기 위해 후보 병렬도는
+    _MUTANT_MAX_WORKERS로 상한을 둔다(후보 n은 보통 2~3이라 실무상 충분).
+    후보가 하나면 그냥 순차 호출(스레드풀 오버헤드 회피)."""
+    if not candidates:
+        return []
+    if len(candidates) == 1:
+        return [
+            compute_mutation_score(
+                candidates[0], relevant_tests, repo_path, base_content,
+                budget=budget, trust_threshold=trust_threshold,
+            )
+        ]
+    workers = min(len(candidates), _MUTANT_MAX_WORKERS)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(
+            pool.map(
+                lambda c: compute_mutation_score(
+                    c, relevant_tests, repo_path, base_content,
+                    budget=budget, trust_threshold=trust_threshold,
+                ),
+                candidates,
+            )
+        )
