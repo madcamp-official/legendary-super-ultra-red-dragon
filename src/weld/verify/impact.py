@@ -39,6 +39,7 @@ from pathlib import Path
 
 from coverage import CoverageData
 
+from weld.langs import detect_language
 from weld.types import TestId
 
 _EXCLUDED_DIR_NAMES = {
@@ -109,6 +110,13 @@ def _test_node_ids(repo_root: Path, rel_path: str) -> list[TestId]:
                 ) and member.name.startswith(_TEST_FUNC_PREFIX):
                     node_ids.append(f"{rel_path}::{node.name}::{member.name}")
     return node_ids
+
+
+def _is_python_file(file_path: str) -> bool:
+    """coverage 기반 선별은 pytest 커버리지에만 의존한다 — 비Python 파일에는
+    애초에 적용 불가능한 개념이라 언어 판별로 미리 걸러낸다."""
+    spec = detect_language(file_path)
+    return spec is not None and spec.name == "python"
 
 
 def _all_test_node_ids(repo_root: Path) -> list[TestId]:
@@ -269,6 +277,13 @@ def select_relevant_tests(
         return []
 
     repo_root = Path(repo_path)
+
+    if any(not _is_python_file(f) for f in changed_files):
+        # coverage 기반 선별은 pytest/coverage.py 전제라 비Python 파일엔 못 쓴다
+        # (baseline에도 안 잡힘). 비싼 baseline 실행 자체를 건너뛰고 보수적으로
+        # 전체 테스트 폴백 — verify/sandbox.py가 어차피 비Python은 이 목록을
+        # 무시하고 언어별 test_command 전체 스위트를 돌리니 정합적이다.
+        return _all_test_node_ids(repo_root)
 
     if os.environ.get(_BASELINE_ENV_FLAG):
         # baseline 서브프로세스가 돌린 테스트 안에서 재진입한 경우 — 또
