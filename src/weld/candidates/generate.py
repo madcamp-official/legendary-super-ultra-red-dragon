@@ -53,7 +53,16 @@ from weld.types import MergeCandidate
 
 load_dotenv()
 
-_DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+# LLM 프로바이더 스위치. WELD_LLM_BASE_URL이 설정돼 있으면 OpenAI 호환
+# 엔드포인트(친구가 직접 띄운 모델 등)를 쓰고, 없으면 기존 Gemini를 쓴다.
+# gated라 이 변수를 안 채우면 지금까지의 Gemini 동작 그대로다.
+_LLM_BASE_URL = os.environ.get("WELD_LLM_BASE_URL", "").strip()
+_USE_CUSTOM_LLM = bool(_LLM_BASE_URL)
+_DEFAULT_MODEL = (
+    os.environ.get("WELD_LLM_MODEL", "").strip()
+    if _USE_CUSTOM_LLM
+    else os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+)
 
 _LLM_CACHE_VERSION = 1
 _LLM_CACHE_LOCK = threading.Lock()
@@ -110,7 +119,27 @@ _ConflictHunk = tuple[str, str, str]  # (ours, base, theirs)
 _Segment = str | _ConflictHunk
 
 
-def _build_client() -> genai.Client:
+def _build_client():
+    """LLM 클라이언트를 만든다 — WELD_LLM_BASE_URL이 있으면 OpenAI 호환,
+    없으면 Gemini. 반환 타입은 프로바이더에 따라 다르니 _call_llm이 분기한다."""
+    if _USE_CUSTOM_LLM:
+        from openai import OpenAI
+
+        api_key = os.environ.get("WELD_LLM_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "커스텀 LLM 키가 없다. .env에 WELD_LLM_API_KEY=... 를 추가하라 "
+                "(인증 없는 로컬 엔드포인트면 아무 값이나 넣어도 된다)."
+            )
+        if not _DEFAULT_MODEL:
+            raise RuntimeError(
+                "WELD_LLM_BASE_URL을 썼으면 WELD_LLM_MODEL=... 도 .env에 지정해야 한다."
+            )
+        # 큰 모델(235B 등)은 긴 응답에 시간이 걸린다 — 기본 600초, WELD_LLM_TIMEOUT로 조정.
+        # base_url이 http://여도 OpenAI SDK는 그 스킴을 그대로 쓴다(TLS 강제 안 함).
+        timeout = float(os.environ.get("WELD_LLM_TIMEOUT", "600"))
+        return OpenAI(base_url=_LLM_BASE_URL, api_key=api_key, timeout=timeout)
+
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -162,15 +191,25 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
     if cached is not None:
         return cached
 
-    response = client.models.generate_content(
-        model=_DEFAULT_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    if _USE_CUSTOM_LLM:
+        # OpenAI 호환 chat completions (친구 커스텀 모델 등). thinking_config는
+        # Gemini 전용이라 여기선 안 쓴다.
+        resp = client.chat.completions.create(
+            model=_DEFAULT_MODEL,
+            messages=[{"role": "user", "content": prompt}],
             temperature=temperature,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    text = (response.text or "").strip()
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    else:
+        response = client.models.generate_content(
+            model=_DEFAULT_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=temperature,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        text = (response.text or "").strip()
 
     with _LLM_CACHE_LOCK:
         cache = _load_llm_cache()
