@@ -21,7 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from weld.langs import LanguageSpec, detect_language
+from weld.langs import LanguageSpec, detect_language, effective_test_command
 from weld.types import MergeCandidate, TestId, VerificationResult
 
 _WORKTREE_TIMEOUT_S = 30
@@ -122,6 +122,23 @@ def _add_worktree(repo_path: str, worktree: Path) -> str | None:
     if result.returncode != 0:
         return f"git worktree add 실패(exit {result.returncode}): {result.stderr.strip()}"
     return None
+
+
+def _link_dependency_dir(src_repo: Path, dst_repo: Path, name: str) -> None:
+    """원본 저장소의 의존성 디렉터리(node_modules 등)를 worktree에 심링크한다.
+
+    node_modules는 .gitignore돼서 git worktree에 안 들어오는데, vitest/jest가
+    돌려면 있어야 하므로 붙인다. 수백 MB라 후보마다 복사하면 치명적이라 복사
+    대신 심링크(절대경로로 resolve — worktree 안에서 상대경로면 깨진다).
+    원본에 없거나(설치 안 됨) 이미 있으면 조용히 넘어간다 — 그 경우 테스트가
+    안 돌아 검증 실패로 정상 처리된다(verify/mutation_ts.py와 동일 패턴)."""
+    src = src_repo / name
+    dst = dst_repo / name
+    if src.exists() and not dst.exists():
+        try:
+            os.symlink(src.resolve(), dst)
+        except OSError:
+            pass
 
 
 def _remove_worktree(repo_path: str, worktree: Path) -> None:
@@ -265,19 +282,26 @@ def _check_compiles_lang(worktree: Path, spec: LanguageSpec, file_path: str) -> 
 
 
 def _run_tests_lang(
-    worktree: Path, spec: LanguageSpec
+    worktree: Path, spec: LanguageSpec, tests: list[TestId] | None
 ) -> tuple[list[TestId], list[TestId], bool, str | None]:
-    """비Python 언어 테스트 게이트. 개별 테스트 ID 파싱 불가라 exit code + 스위트
-    표식 하나로 대신한다 (evaluation/multilang.py의 임시 로직과 동일 계약)."""
-    if spec.test_command is None:
+    """비Python 언어 테스트 게이트. 개별 테스트 ID 파싱 불가라 exit code + 표식
+    하나로 대신한다 (evaluation/multilang.py의 임시 로직과 동일 계약).
+
+    tests(impact 선별 결과)가 주어지면 effective_test_command가 그 파일만 도는
+    targeted 명령을 만든다(npx vitest run <파일> 등) — 실제 저장소는 전체
+    스위트가 느리거나 무관한 브라우저/e2e 테스트로 baseline이 깨지므로 선별을
+    좁혀 돌려야 실용적이다. targeting 불가 언어(make c/cpp 등)는 전체 스위트로
+    자연 폴백해 fail-safe가 유지된다."""
+    command = effective_test_command(spec, worktree, tests)
+    if command is None:
         return [], [], False, f"테스트 실행 방법을 모르는 언어: {spec.name}"
 
     try:
-        result = _run(list(spec.test_command), cwd=worktree, timeout=_TEST_TIMEOUT_S)
+        result = _run(list(command), cwd=worktree, timeout=_TEST_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return [], [], False, "테스트 실행 타임아웃"
 
-    marker = f"{spec.name}-full-suite"
+    marker = f"{spec.name}-targeted" if tests else f"{spec.name}-full-suite"
     passed = result.returncode == 0
     if passed:
         return [marker], [], True, None
@@ -307,6 +331,10 @@ def run_in_sandbox(
                 error=add_error,
             )
 
+        # node_modules는 .gitignore돼 worktree에 안 들어온다 — JS/TS 테스트가
+        # 돌 수 있게 원본에서 심링크로 붙인다(후보 파일 쓰기 전).
+        _link_dependency_dir(Path(repo_path), worktree, "node_modules")
+
         try:
             if candidate.file_path:
                 target = worktree / candidate.file_path
@@ -332,8 +360,11 @@ def run_in_sandbox(
             if is_python:
                 tests_run, tests_failed, tests_passed, test_error = _run_tests(worktree, tests)
             else:
-                # 비Python은 pytest 노드 ID 개념이 없다 — tests 인자 무시하고 전체 스위트로 폴백.
-                tests_run, tests_failed, tests_passed, test_error = _run_tests_lang(worktree, spec)
+                # 비Python은 pytest 노드 ID 개념이 없지만, tests(impact 선별)를
+                # 넘겨 targeted 러너(vitest/jest 등)로 관련 파일만 돌린다.
+                tests_run, tests_failed, tests_passed, test_error = _run_tests_lang(
+                    worktree, spec, tests
+                )
             return VerificationResult(
                 candidate_id=candidate.id,
                 compiled=True,
