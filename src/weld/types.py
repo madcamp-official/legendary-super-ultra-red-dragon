@@ -71,13 +71,21 @@ class MutationScore:
     survived_mutants: list[str] = field(default_factory=list)
     """생존한 뮤턴트 설명 문자열(예: "mutation.py:42 `<` -> `<=`"). 테스트 ID 아님."""
     sites_total: int = 0
-    """변경 영역에서 발견된 뮤테이션 사이트 수. mutants_total==0일 때 그 이유를
-    구분하는 데 쓴다 — 0이면 "변형할 코드 자체가 없음"(버전 문자열만 바뀐 경우 등),
-    0보다 크면 "사이트는 있는데 테스트가 실행/커버하지 못함"."""
+    """`_collect_mutation_sites`가 찾은, 판정 여부와 무관한 원래 뮤테이션 사이트 개수
+    (필터링/우선순위 배분 전 원본 개수 — verify/mutation.py의 `_prioritize_sites`가
+    일부를 걸러내도 이 값은 안 바뀐다).
+
+    mutants_total/mutants_killed는 "테스트가 실제로 그 줄을 지나간" 사이트만 센다
+    (그 외는 미커버로 스킵됨) — 그래서 mutants_total==0이 "변형할 코드가 애초에
+    없었다"(sites_total==0)는 뜻인지 "코드는 있는데 테스트가 전혀 못 봤다"
+    (sites_total>0)는 뜻인지 이 필드 없이는 구분이 안 된다.
+    policy/trust.py가 이 둘을 다르게 판정하는 데 쓴다."""
     mutants_uncovered: int = 0
     """주입은 했지만 테스트가 그 줄을 지나가지 않아 판정 불가로 제외된 뮤턴트 수.
     sites_total>0 && mutants_total==0 && mutants_uncovered>0 이면 "변경 영역을
-    지나가는 테스트가 없다"는 뜻이라 policy.trust가 에스컬레이션 근거로 쓴다."""
+    지나가는 테스트가 없다"는 뜻이라 policy.trust가 에스컬레이션 근거로 쓴다.
+    (sites_total - mutants_total - mutants_uncovered는 budget/조기종료로 아예
+    시도조차 안 된 사이트 수 — 별도로 추적하지 않는다.)"""
 
     @property
     def score(self) -> float:

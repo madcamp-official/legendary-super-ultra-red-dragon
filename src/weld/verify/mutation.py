@@ -549,13 +549,11 @@ def compute_mutation_score(
         # 말고 "신호 없음"으로 조용히 반환한다.
         return MutationScore(candidate_id=candidate.id, mutants_total=0, mutants_killed=0)
     sites = _collect_mutation_sites(tree, changed_lines)
+    sites_total = len(sites)
 
     if not sites or not relevant_tests or not candidate.file_path:
         return MutationScore(
-            candidate_id=candidate.id,
-            mutants_total=0,
-            mutants_killed=0,
-            sites_total=len(sites),
+            candidate_id=candidate.id, mutants_total=0, mutants_killed=0, sites_total=sites_total
         )
 
     killed = 0
@@ -612,6 +610,6 @@ def compute_mutation_score(
         mutants_total=total,
         mutants_killed=killed,
         survived_mutants=survived,
-        sites_total=len(sites),
+        sites_total=sites_total,
         mutants_uncovered=uncovered,
     )
