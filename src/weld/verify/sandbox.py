@@ -31,6 +31,30 @@ _LANG_BUILD_TIMEOUT_S = 60
 
 _TEST_RESULT_RE = re.compile(r"^(\S+::\S+)\s+(PASSED|FAILED|ERROR|SKIPPED)\b")
 
+# 최상단 import/export 존재 여부로 ESM인지 스니핑한다.
+_ESM_HINT_RE = re.compile(r"(?m)^\s*(?:import\b|export\b)")
+
+
+def _node_check_path(target: Path, content: str) -> Path:
+    """node --check가 실제로 검사할 경로를 정한다.
+
+    확장자가 애매한 .js/.ts에 package.json `type: module` 선언이 없으면,
+    node의 기본 활성 휴리스틱(detect-module)이 import/export를 보고
+    ESM으로 재파싱을 시도하는데 — 그 재파싱이 실패해도 --check가 에러를
+    삼키고 exit 0을 내는 버그가 있다(Node 22 실측 확인: 깨진 문법의 .js가
+    통과 처리됨, 같은 내용을 .mjs로 저장하면 정상적으로 잡힘). import/export
+    존재를 정적으로 스니핑해서, 이미 .mjs/.mts가 아니면 그 확장자로 강제한
+    사본을 만들어 실제 module 파싱 경로로 검사한다.
+    """
+    if target.suffix in (".mjs", ".mts", ".cjs", ".cts"):
+        return target
+    if not _ESM_HINT_RE.search(content):
+        return target
+    forced_suffix = ".mts" if target.suffix in (".ts", ".tsx") else ".mjs"
+    forced = target.with_suffix(forced_suffix)
+    forced.write_text(content, encoding="utf-8")
+    return forced
+
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     """proc가 낳은 자식까지 통째로 죽인다. proc.kill()은 직계만 죽여서
@@ -214,8 +238,9 @@ def _check_compiles_lang(worktree: Path, spec: LanguageSpec, file_path: str) -> 
 
     if spec.name in ("javascript", "typescript"):
         target = worktree / file_path
+        check_target = _node_check_path(target, target.read_text(encoding="utf-8"))
         try:
-            result = _run(["node", "--check", str(target)], timeout=_COMPILE_TIMEOUT_S)
+            result = _run(["node", "--check", str(check_target)], timeout=_COMPILE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             return False, "문법 검사 타임아웃"
         if result.returncode != 0:

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,6 +41,31 @@ from weld.types import MergeCandidate, MutationScore, VerificationResult
 from weld.verify.mutation import compute_mutation_score
 
 _SUITE_TIMEOUT_S = 120
+
+# 최상단 import/export 존재 여부로 ESM인지 스니핑한다.
+_ESM_HINT_RE = re.compile(r"(?m)^\s*(?:import\b|export\b)")
+
+
+def _node_check_path(target: Path, content: str) -> Path:
+    """node --check가 실제로 검사할 경로를 정한다.
+
+    확장자가 애매한 .js/.ts는 package.json `type: module` 선언이 없으면
+    node의 기본 활성 휴리스틱(detect-module)이 import/export를 보고 ESM으로
+    재파싱을 시도하는데, 그 재파싱이 실패해도 --check가 에러를 삼키고
+    exit 0을 내는 버그가 있다(Node 22 실측: 깨진 문법의 .js가 통과 처리됨,
+    같은 내용을 .mjs로 저장하면 정상적으로 잡힘 — verify/sandbox.py의
+    _node_check_path와 같은 근거). import/export 존재를 정적으로 스니핑해서,
+    이미 .mjs/.mts가 아니면 그 확장자로 강제한 사본을 만들어 실제 module
+    파싱 경로로 검사한다.
+    """
+    if target.suffix in (".mjs", ".mts", ".cjs", ".cts"):
+        return target
+    if not _ESM_HINT_RE.search(content):
+        return target
+    forced_suffix = ".mts" if target.suffix in (".ts", ".tsx") else ".mjs"
+    forced = target.with_suffix(forced_suffix)
+    forced.write_text(content, encoding="utf-8")
+    return forced
 
 
 def _verify_with_lang_tests(
@@ -77,8 +103,9 @@ def _verify_with_lang_tests(
                     duration_s=time.monotonic() - start,
                 )
         elif spec.name in ("javascript", "typescript"):
+            check_target = _node_check_path(target, candidate.content)
             check = subprocess.run(
-                ["node", "--check", str(target)], capture_output=True, text=True
+                ["node", "--check", str(check_target)], capture_output=True, text=True
             )
             if check.returncode != 0:
                 return VerificationResult(
