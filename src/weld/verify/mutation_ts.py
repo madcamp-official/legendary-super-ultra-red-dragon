@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from weld.langs import LanguageSpec, detect_language, effective_test_command
 from weld.types import MergeCandidate, MutationScore
 from weld.verify.mutation import (
     _MIN_SAMPLES_FOR_EARLY_STOP,
+    _MUTANT_MAX_WORKERS,
     _TEST_TIMEOUT_S,
     _changed_line_numbers,
     _wilson_interval,
@@ -257,64 +259,86 @@ def compute_mutation_score_ts(
     total = 0
     runs = 0
     survived: list[str] = []
+    target_rel = candidate.file_path
+    workers = min(_MUTANT_MAX_WORKERS, len(sites)) if len(sites) > 1 else 1
 
     with tempfile.TemporaryDirectory(prefix="weld-mutation-ts-") as tmp:
-        tmp_repo = Path(tmp) / "repo"
-        shutil.copytree(
-            repo_path, tmp_repo,
-            ignore=shutil.ignore_patterns(
-                ".git", ".venv", "node_modules", "__pycache__", "target", "dist"
-            ),
-        )
-        # node_modules는 위에서 복사 제외(186MB 복사는 뮤턴트마다 하면 치명적)
-        # 하되, vitest/jest가 실행되려면 있어야 하므로 원본에서 심링크로 붙인다.
-        _link_dependency_dir(Path(repo_path), tmp_repo, "node_modules")
-        target_file = tmp_repo / candidate.file_path
+        # 워커마다 격리된 저장소 사본 하나. 뮤턴트가 같은 파일을 덮어쓰므로
+        # 병렬 실행하려면 사본이 워커 수만큼 필요하다(뮤턴트마다 복사하면
+        # 치명적이라 워커 수 W개로 상한). node_modules는 복사 제외 후 심링크.
+        worker_repos: list[Path] = []
+        for i in range(workers):
+            wr = Path(tmp) / f"repo{i}"
+            shutil.copytree(
+                repo_path, wr,
+                ignore=shutil.ignore_patterns(
+                    ".git", ".venv", "node_modules", "__pycache__", "target", "dist"
+                ),
+            )
+            _link_dependency_dir(Path(repo_path), wr, "node_modules")
+            worker_repos.append(wr)
 
-        # 관련 테스트만 도는 targeted 명령(선별 있으면). 없으면 저장소 러너
-        # 위임 또는 정적 기본값. 실제 저장소는 전체 스위트가 느리거나 무관한
-        # 테스트로 baseline이 깨지므로 선별이 실용성의 관건.
-        test_command = effective_test_command(spec, tmp_repo, relevant_tests)
+        # 관련 테스트만 도는 targeted 명령(선별 있으면). 경로 구조가 같으니
+        # worker_repos[0] 기준으로 만든다.
+        test_command = effective_test_command(spec, worker_repos[0], relevant_tests)
 
-        # baseline: 원본 후보가 (빌드 포함) 초록이어야 "실패 = 뮤턴트를
-        # 잡았다"가 성립한다.
-        target_file.write_bytes(source)
+        # baseline: 원본 후보가 (빌드 포함) 초록이어야 "실패 = 뮤턴트를 잡았다"가
+        # 성립한다. 워커 0에서 한 번만 검사한다.
+        (worker_repos[0] / target_rel).write_bytes(source)
         if spec.build_command is not None:
-            if _run_language_tests(tmp_repo, spec.build_command) is not True:
+            if _run_language_tests(worker_repos[0], spec.build_command) is not True:
                 return _no_signal(candidate.id, sites_total=len(sites))
-        if _run_language_tests(tmp_repo, test_command) is not True:
+        if _run_language_tests(worker_repos[0], test_command) is not True:
             return _no_signal(candidate.id, sites_total=len(sites))
 
-        for site in sites:
+        def _run_one(worker_repo: Path, site: _SpliceSite) -> str:
+            """뮤턴트 하나를 격리된 worker_repo에서 실행 → 결과 문자열.
+            killed(테스트가 잡음)/survived/invalid(컴파일 불능)/timeout(판정 불가)."""
+            (worker_repo / target_rel).write_bytes(_apply_splice(source, site))
+            if spec.build_command is not None:
+                built = _run_language_tests(worker_repo, spec.build_command)
+                if built is None:
+                    return "timeout"
+                if built is False:
+                    return "invalid"  # 컴파일 불능 뮤턴트 — 집계 제외
+            passed = _run_language_tests(worker_repo, test_command)
+            if passed is None:
+                return "timeout"
+            return "survived" if passed else "killed"
+
+        # 사이트를 워커 수만큼씩 배치로 병렬 실행하고, 배치가 끝날 때마다
+        # 예산/조기종료를 확인한다(순차 대비 배치 하나만큼 더 돌 수 있으나,
+        # 그건 표본이 늘어 점수가 더 정확해지는 방향이라 안전하다).
+        idx = 0
+        stop = False
+        while idx < len(sites) and not stop:
             if budget is not None and runs >= budget:
                 break
+            batch = list(sites[idx : idx + workers])
+            if budget is not None:
+                batch = batch[: budget - runs]
+            idx += len(batch)
 
-            target_file.write_bytes(_apply_splice(source, site))
-            runs += 1
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                outcomes = list(
+                    pool.map(lambda j: (batch[j], _run_one(worker_repos[j], batch[j])),
+                             range(len(batch)))
+                )
 
-            if spec.build_command is not None:
-                built = _run_language_tests(tmp_repo, spec.build_command)
-                if built is None:
-                    continue  # 빌드 타임아웃 — 판정 불가, 집계 제외
-                if built is False:
-                    # 무효 뮤턴트(컴파일 불능) — kill로 세면 점수가 부풀려지므로
-                    # 집계에서 제외한다. 테스트가 결함을 '잡은' 게 아니다.
-                    continue
-
-            passed = _run_language_tests(tmp_repo, test_command)
-            if passed is None:
-                continue  # 타임아웃 — 판정 불가, 집계 제외
-
-            total += 1
-            if not passed:
-                killed += 1
-            else:
-                survived.append(site.description)
-
-            if trust_threshold is not None and total >= _MIN_SAMPLES_FOR_EARLY_STOP:
-                low, high = _wilson_interval(killed, total)
-                if high < trust_threshold or low > trust_threshold:
-                    break
+            for site, outcome in outcomes:
+                runs += 1
+                if outcome in ("timeout", "invalid"):
+                    continue  # 판정 불가/무효 — 집계 제외
+                total += 1
+                if outcome == "killed":
+                    killed += 1
+                else:
+                    survived.append(site.description)
+                if trust_threshold is not None and total >= _MIN_SAMPLES_FOR_EARLY_STOP:
+                    low, high = _wilson_interval(killed, total)
+                    if high < trust_threshold or low > trust_threshold:
+                        stop = True
+                        break
 
     return MutationScore(
         candidate_id=candidate.id,

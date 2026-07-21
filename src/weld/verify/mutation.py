@@ -67,6 +67,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -77,6 +78,12 @@ from weld.types import MergeCandidate, MutationScore, TestId
 
 _TEST_TIMEOUT_S = 60
 _MIN_SAMPLES_FOR_EARLY_STOP = 5
+
+# 뮤턴트 병렬 실행 워커 수 상한. 각 워커가 격리된 저장소 사본을 갖고 뮤턴트를
+# 배치로 동시에 돌린다(뮤턴트끼리 독립). 사본 W개 복사 오버헤드가 있어 무한정
+# 늘리진 않는다 — 테스트 실행 시간이 지배적인 대형 저장소에서 이득이 크다.
+# verify/mutation_ts.py도 이 상수를 import해 같은 정책을 쓴다.
+_MUTANT_MAX_WORKERS = 4
 
 _COMPARISON_FLIPS: dict[type, type] = {
     ast.Lt: ast.LtE,
@@ -563,49 +570,82 @@ def compute_mutation_score(
     runs = 0
     uncovered = 0
     survived: list[str] = []
+    target_rel = candidate.file_path
 
     with tempfile.TemporaryDirectory(prefix="weld-mutation-") as tmp:
-        tmp_repo = Path(tmp) / "repo"
+        # 프로파일링은 사본 하나에서 한 번만(순차) — 약한 영역 우선순위를 잡는다.
+        profile_repo = Path(tmp) / "profile"
         shutil.copytree(
-            repo_path,
-            tmp_repo,
+            repo_path, profile_repo,
             ignore=shutil.ignore_patterns(".venv", ".git", "__pycache__", "*.pyc", ".pytest_cache"),
         )
-        target_file = tmp_repo / candidate.file_path
-
-        # 뮤턴트 돌리기 전에 원본을 한 번 프로파일링해서 약한 영역 우선순위를 잡는다.
-        target_file.write_text(candidate.content)
-        line_coverage = _profile_line_coverage(tmp_repo, target_file, relevant_tests)
+        (profile_repo / target_rel).write_text(candidate.content)
+        line_coverage = _profile_line_coverage(
+            profile_repo, profile_repo / target_rel, relevant_tests
+        )
         sites = _prioritize_sites(sites, line_coverage)
 
-        for site in sites:
+        # 뮤턴트를 병렬로 돌리려면 워커마다 격리된 사본이 필요하다(같은 파일을
+        # 덮어쓰므로). profile_repo를 워커 0으로 재사용하고 나머지를 복사한다.
+        workers = min(_MUTANT_MAX_WORKERS, len(sites)) if len(sites) > 1 else 1
+        worker_repos: list[Path] = [profile_repo]
+        for i in range(1, workers):
+            wr = Path(tmp) / f"repo{i}"
+            shutil.copytree(
+                repo_path, wr,
+                ignore=shutil.ignore_patterns(
+                    ".venv", ".git", "__pycache__", "*.pyc", ".pytest_cache"
+                ),
+            )
+            worker_repos.append(wr)
+
+        def _run_one(worker_repo: Path, site: _MutationSite) -> str:
+            """뮤턴트 하나를 격리된 worker_repo에서 실행 → 결과 문자열.
+            _apply_site는 tree를 deepcopy하므로(공유 tree 불변) 스레드 안전하고,
+            coverage 데이터 파일은 worker_repo별로 분리돼 충돌하지 않는다."""
+            worker_target = worker_repo / target_rel
+            worker_target.write_text(_apply_site(tree, site))
+            executed, failed = _run_tests_with_coverage(
+                worker_repo, worker_target, site.lineno, relevant_tests
+            )
+            if not executed:
+                return "uncovered"  # 테스트가 그 줄을 안 지나감 — 판단 불가, 집계 제외
+            return "killed" if failed else "survived"
+
+        # 사이트를 워커 수만큼씩 배치로 병렬 실행하고, 배치마다 예산/조기종료를
+        # 확인한다(순차 대비 배치 하나만큼 더 돌 수 있으나 표본이 늘어 점수가
+        # 더 정확해지는 방향이라 안전하다). 우선순위 정렬 순서는 그대로 유지된다.
+        idx = 0
+        stop = False
+        while idx < len(sites) and not stop:
             if budget is not None and runs >= budget:
                 break
+            batch = list(sites[idx : idx + workers])
+            if budget is not None:
+                batch = batch[: budget - runs]
+            idx += len(batch)
 
-            mutated_source = _apply_site(tree, site)
-            target_file.write_text(mutated_source)
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                outcomes = list(
+                    pool.map(lambda j: (batch[j], _run_one(worker_repos[j], batch[j])),
+                             range(len(batch)))
+                )
 
-            executed, failed = _run_tests_with_coverage(
-                tmp_repo, target_file, site.lineno, relevant_tests
-            )
-            runs += 1
-
-            if not executed:
-                # 이 뮤턴트는 테스트가 그 줄을 지나가지도 않았다 — 판단 불가, 집계 제외.
-                uncovered += 1
-                continue
-
-            total += 1
-            if failed:
-                killed += 1
-            else:
-                survived.append(site.description)
-
-            # 조기 종료: 신뢰구간이 임계값 한쪽으로 확실히 벗어나면 결론이 굳었다.
-            if trust_threshold is not None and total >= _MIN_SAMPLES_FOR_EARLY_STOP:
-                low, high = _wilson_interval(killed, total)
-                if high < trust_threshold or low > trust_threshold:
-                    break
+            for site, outcome in outcomes:
+                runs += 1
+                if outcome == "uncovered":
+                    uncovered += 1
+                    continue
+                total += 1
+                if outcome == "killed":
+                    killed += 1
+                else:
+                    survived.append(site.description)
+                if trust_threshold is not None and total >= _MIN_SAMPLES_FOR_EARLY_STOP:
+                    low, high = _wilson_interval(killed, total)
+                    if high < trust_threshold or low > trust_threshold:
+                        stop = True
+                        break
 
     return MutationScore(
         candidate_id=candidate.id,
