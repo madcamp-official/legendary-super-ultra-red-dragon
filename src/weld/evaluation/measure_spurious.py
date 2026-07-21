@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from weld.classify.mergiraf import classify_conflict
 from weld.evaluation.mining import mine_conflicts
 from weld.types import MergeCandidate
-from weld.verify.impact import select_relevant_tests
 from weld.verify.sandbox import run_in_sandbox
 
 
@@ -71,8 +70,33 @@ class SpuriousStats:
         return self.failed
 
 
+# 전체 스위트를 돌리되 무관한 디렉터리(bench/·미설치 의존성 등)의 수집 에러로
+# 세션 전체가 중단되지 않게 한다 — 이게 없으면 한 곳의 collect 에러로 0개 실행돼
+# 멀쩡한 커밋도 판정 불가로 빠진다. run_in_sandbox는 tests 리스트를 pytest 인자로
+# 그대로 붙이므로 경로 없이 이 플래그만 넘기면 cwd(worktree) 전체를 수집한다.
+_FULL_SUITE = ["--continue-on-collection-errors"]
+
+
 def _checkout(repo: str, commit: str) -> None:
     subprocess.run(["git", "-C", repo, "checkout", "-q", commit], check=True)
+
+
+def _norm(node_id: str) -> str:
+    """샌드박스 worktree의 임시경로 접두어를 떼어 저장소상대 nodeid로 정규화한다.
+
+    샌드박스는 매번 다른 임시 worktree(.../worktree/...)에서 돌아서 같은 테스트라도
+    실행마다 절대경로 접두어가 다르다. baseline/후보 두 실행의 통과·실패 집합을
+    맞대려면 이 접두어를 떼어 'testfile::test' 형태로 통일해야 한다.
+    """
+    return node_id.split("/worktree/")[-1]
+
+
+def _passing(result) -> set[str]:  # noqa: ANN001 (VerificationResult)
+    """실행 결과에서 통과한 테스트의 정규화 nodeid 집합. 스위트가 안 돌면 빈 집합."""
+    if not result.tests_run:
+        return set()
+    failed = {_norm(t) for t in result.tests_failed}
+    return {_norm(t) for t in result.tests_run} - failed
 
 
 def _default_branch(repo: str) -> str | None:
@@ -92,12 +116,20 @@ def _default_branch(repo: str) -> str | None:
     return None
 
 
-def measure(repo: str, limit: int | None = None, *, quiet: bool = False) -> SpuriousStats:
+def measure(
+    repo: str,
+    limit: int | None = None,
+    *,
+    max_cases: int | None = None,
+    quiet: bool = False,
+) -> SpuriousStats:
     branch = _default_branch(repo)
     if branch:
         subprocess.run(["git", "-C", repo, "checkout", "-q", branch], check=False)
 
-    conflicts = mine_conflicts(repo)
+    # max_cases: 최근 병합부터 이만큼만 채굴(rev-list --merges는 최신순) → 저장소당
+    # 시간을 제한하고, 현재 환경에서 테스트가 도는 '최근' 커밋을 우선한다.
+    conflicts = mine_conflicts(repo, max_cases=max_cases)
     if not quiet:
         print(f"채굴된 충돌: {len(conflicts)}건. mergiraf 분류 + 검증 중...\n")
 
@@ -109,31 +141,35 @@ def measure(repo: str, limit: int | None = None, *, quiet: bool = False) -> Spur
         st.spurious += 1
 
         _checkout(repo, c.source_commit)
-        tests = select_relevant_tests([c.file_path], repo_path=repo)
 
-        # finding A(테스트 기반 정답) 게이트: 먼저 '사람이 실제로 채택한 해법'을 같은
-        # 테스트에 태운다. 이게 통과 못 하면 옛 커밋/의존성/러너 버전 탓에 환경이
-        # 깨진 것 → 판정 불가(skip). baseline이 통과할 때만, 자동병합 결과가 '새'
-        # 실패를 만드는지를 오탐으로 센다. 이 게이트가 없으면 환경 깨짐이 오탐으로
-        # 오집계된다(옛 저장소에서 100% '실패'처럼 보이는 현상).
+        # 차등(differential) finding A 판정 — 전체 스위트를 돌리되, '사람이 실제로
+        # 채택한 해법'에서 통과한 테스트 집합만 기준으로 삼는다. 자동병합 결과가 그
+        # 통과 테스트 중 하나라도 깨면 오탐, 아니면 무오탐. 이렇게 하면 그 커밋에
+        # 원래부터 있던 무관한 실패(flaky·환경·미설치 의존성)가 자동으로 상쇄되어,
+        # impact.py 선별(옛 커밋에서 nodeid 수집 실패)이나 '전체 통과' 요구(무관한
+        # 실패 1개로 판정불가) 없이도 견고하게 오탐을 잰다. 어제 ★의 '전체 슈트로
+        # 검증'과 동일한 방법론.
         baseline = run_in_sandbox(
             MergeCandidate(id=f"{c.id}~human", content=c.ground_truth_resolution or "",
                            file_path=c.file_path),
-            repo_path=repo, tests=tests,
+            repo_path=repo, tests=_FULL_SUITE,
         )
-        if not baseline.tests_run or not baseline.tests_passed:
-            st.skipped += 1  # baseline(사람 해법)조차 통과 못 함 — 환경 문제, 판정 불가
+        base_pass = _passing(baseline)
+        if not base_pass:
+            st.skipped += 1  # 스위트가 아예 안 돌거나 통과 테스트 0 — 판정 불가
             continue
 
-        candidate = MergeCandidate(
-            id=c.id, content=classification.resolved_content or "", file_path=c.file_path
+        result = run_in_sandbox(
+            MergeCandidate(id=c.id, content=classification.resolved_content or "",
+                           file_path=c.file_path),
+            repo_path=repo, tests=_FULL_SUITE,
         )
-        result = run_in_sandbox(candidate, repo_path=repo, tests=tests)
+        regressed = base_pass & {_norm(t) for t in result.tests_failed}
         st.judged += 1
-        if not result.tests_passed:
-            st.failed += 1  # baseline은 통과하는데 자동병합만 실패 = 진짜 오탐
+        if regressed:
+            st.failed += 1  # baseline 통과 테스트를 자동병합이 깼다 = 진짜 오탐
             if not quiet:
-                print(f"  [오탐] {c.id}  ({len(result.tests_failed)}개 테스트 실패)")
+                print(f"  [오탐] {c.id}  (회귀 {len(regressed)}개: {sorted(regressed)[:2]})")
 
         if limit is not None and st.judged >= limit:
             break
@@ -158,12 +194,14 @@ def _print(st: SpuriousStats) -> None:
     print(f"검증 게이트가 걸러낸 mergiraf 오병합 = {st.caught_by_gate}건 (에스컬레이션 처리)")
 
 
-def sweep(repos: list[str], limit: int | None = None) -> SpuriousStats:
+def sweep(
+    repos: list[str], limit: int | None = None, *, max_cases: int | None = None
+) -> SpuriousStats:
     """여러 저장소를 순회하며 판정 N을 합산한다 — N을 유의미하게 늘리는 자동화."""
     total = SpuriousStats(repo="(sweep)")
     for repo in repos:
         print(f"\n########## {repo} ##########", flush=True)
-        st = measure(repo, limit)
+        st = measure(repo, limit, max_cases=max_cases)
         total.add(st)
         print(
             f"  누적 → N={total.judged}, 오탐={total.failed} "
@@ -179,11 +217,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="mergiraf 가짜 병합의 테스트 실패율 측정")
     parser.add_argument("repos", nargs="+", help="클론된 저장소 경로들 (측정 전용 클론 권장)")
     parser.add_argument("--limit", type=int, default=None, help="저장소당 판정 N건에서 멈춤")
+    parser.add_argument("--max-cases", type=int, default=None,
+                        help="저장소당 최근 병합에서 채굴할 충돌 상한(시간 제한)")
     args = parser.parse_args()
     if len(args.repos) == 1:
-        measure(args.repos[0], args.limit)
+        measure(args.repos[0], args.limit, max_cases=args.max_cases)
     else:
-        sweep(args.repos, args.limit)
+        sweep(args.repos, args.limit, max_cases=args.max_cases)
 
 
 if __name__ == "__main__":
