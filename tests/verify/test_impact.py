@@ -161,10 +161,16 @@ def test_select_relevant_tests_non_python_uses_callgraph(tmp_path):
     _write(
         tmp_path,
         "src/foo.test.js",
+        "const { test } = require('node:test');\n"
         "const { make } = require('./foo');\n"
         "test('make works', () => {\n    if (make() !== 1) throw new Error('fail');\n});\n",
     )
 
+    # node --test는 test()를 전역으로 자동 주입하지 않는다 — node:test에서
+    # 명시적으로 import해야 실제로 통과한다. 실행 기반 검증(callgraph.
+    # verify_relevant_tests)이 이 파일을 실제로 돌려보고 초록인지 확인하므로,
+    # fixture도 실제 동작하는 테스트여야 한다(정적 도달성만 흉내내면 이제
+    # 검증 단계에서 걸러진다).
     result = select_relevant_tests(["src/foo.js"], repo_path=str(tmp_path))
 
     # coverage.py 같은 도구가 없는 언어라 tree-sitter call graph로 선별한다
