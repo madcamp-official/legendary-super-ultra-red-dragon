@@ -177,7 +177,7 @@ def _sandbox_env(worktree: Path) -> dict[str, str]:
     return env
 
 
-def _run_tests(
+def _run_tests_once(
     worktree: Path, tests: list[TestId] | None
 ) -> tuple[list[TestId], list[TestId], bool, str | None]:
     """pytest -v 출력에서 노드ID별 결과를 파싱한다. tests가 없으면 전체 스위트를 돈다."""
@@ -222,6 +222,20 @@ def _run_tests(
         # 결과 라인 파싱이 하나도 안 됐다 — 수집 실패 등, exit code만으론 원인 불명.
         error = (result.stdout + result.stderr).strip()[-4000:]
 
+    return tests_run, tests_failed, tests_passed, error
+
+
+def _run_tests(
+    worktree: Path, tests: list[TestId] | None
+) -> tuple[list[TestId], list[TestId], bool, str | None]:
+    """tests로 좁혀 돌리되, (미지의 환경/pytest 버전에서) 노드ID 수집이 통째로
+    실패하면(tests_run==0) 전체 스위트로 한 번 더 돌려 안전 신호를 확보한다 —
+    선별 실패를 검증 실패로 오판해 불필요하게 에스컬레이션시키지 않기 위한
+    방어선. 근본 원인(worktree 미정규화 경로)은 run_in_sandbox에서 고쳤지만,
+    미지의 수집 실패 케이스에 대비해 남겨둔다."""
+    tests_run, tests_failed, tests_passed, error = _run_tests_once(worktree, tests)
+    if tests and not tests_run:
+        tests_run, tests_failed, tests_passed, error = _run_tests_once(worktree, None)
     return tests_run, tests_failed, tests_passed, error
 
 
@@ -277,7 +291,11 @@ def run_in_sandbox(
     start = time.monotonic()
 
     with tempfile.TemporaryDirectory(prefix="weld-sandbox-") as tmp:
-        worktree = Path(tmp) / "worktree"
+        # .resolve() 필수 — macOS는 tempdir이 /var/folders/...(실제로는
+        # /private/var 심링크)라, 미정규화 경로를 --rootdir/--confcutdir로
+        # 넘기면 pytest가 노드ID를 상대경로로 재계산하다 깨진다(exit 4 또는
+        # '../../../worktree::test_x' 뭉개짐).
+        worktree = Path(tmp).resolve() / "worktree"
 
         add_error = _add_worktree(repo_path, worktree)
         if add_error is not None:
