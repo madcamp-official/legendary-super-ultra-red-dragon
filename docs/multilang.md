@@ -48,12 +48,35 @@ PYTHONPATH=src python -m pytest tests/verify/test_mutation_ts.py -v
 
 ### C/C++ 규약 (중요)
 
-- 저장소 루트 `Makefile`: **기본 타깃 = 테스트 바이너리 빌드**, `test` 타깃 = 실행
-- `build_command`(빌드)와 `test_command`(실행)를 분리 — **빌드가 깨지는 뮤턴트는
-  '무효'로 집계 제외** (kill로 세면 점수 뻥튀기)
-- 빌드 명령에 **`-B` 필수**: macOS GNU make 3.81이 mtime을 초 단위로만 비교해서,
-  1초 안에 파일을 바꾸는 뮤테이션 사이클에서 재빌드를 건너뛰고 낡은 바이너리를
-  실행함(전부 가짜 생존). 실측으로 확인한 함정.
+저장소 루트 `Makefile`이 아래를 지키면 C/C++이 Python급(실행 기반 선별 +
+뮤테이션 kill)으로 동작한다. 규약을 안 지키면 안전하게 전체 스위트로 폴백한다.
+
+1. **기본 타깃(`make`/`make -B`) = 컴파일만, 절대 실행/assert 하지 말 것.**
+   `build_command`(`make -s -B`)는 뮤턴트가 컴파일되는지만 본다. 기본 타깃이
+   테스트를 *실행*하면(assert 포함), 테스트 실패 뮤턴트가 "컴파일 불능=무효"로
+   오분류돼 **kill이 0으로 집계된다**(실측으로 겪은 함정 — 빌드/실행을 반드시 분리).
+2. **`test` 타깃 = 컴파일+실행**, 그리고 **`$(TESTS)` 변수를 존중**할 것.
+   `test_command`는 선별이 있으면 `make -s test TESTS=<파일들>`로 그 파일만
+   돌린다(실행 기반 선별의 핵심). `$(TESTS)`를 무시하면 전체 스위트가 돌아 선별
+   효과가 사라진다(깨지진 않음). 기본값 `TESTS ?= <전체 테스트파일>`로 두면 된다.
+3. **테스트 파일 이름 관례**: `tests/` 아래 `test_*.c`/`*_test.c`(callgraph의
+   `_is_test_file_by_name`이 이 관례로 테스트를 탐지). 이래야 선별이 그 파일을 찾는다.
+4. **빌드 명령에 `-B` 필수**: macOS GNU make 3.81이 mtime을 초 단위로만 비교해서,
+   1초 안에 파일을 바꾸는 뮤테이션 사이클에서 재빌드를 건너뛰고 낡은 바이너리를
+   실행함(전부 가짜 생존). 실측으로 확인한 함정.
+
+예시 Makefile:
+```makefile
+CC ?= cc
+TESTS ?= tests/test_add.c tests/test_mul.c
+.PHONY: all test
+all:                        # 기본 타깃: 컴파일만 (실행 X) — build_command용
+	@for t in $(TESTS); do b=/tmp/bin_$$(basename $$t .c); $(CC) -o $$b src/*.c $$t; done
+test:                       # 컴파일 + 실행, $(TESTS) 존중 — test_command용
+	@for t in $(TESTS); do b=/tmp/bin_$$(basename $$t .c); $(CC) -o $$b src/*.c $$t && $$b || exit 1; done
+```
+실측: 이 규약 저장소에서 `select_relevant_tests(['src/math.c'])`가 관련 C 테스트를
+반환하고, 뮤테이션이 kill 판정(사이트 1, kill 1, 점수 1.0)까지 완주함.
 
 ## tree-sitter 뮤테이션 엔진 요약 (`mutation_ts.py`)
 
