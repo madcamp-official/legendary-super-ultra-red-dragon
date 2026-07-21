@@ -168,31 +168,38 @@ def effective_test_command(
     경우 `npm test`로 위임하고(vitest/jest 자동 호출), 그것도 없으면 정적
     기본값(데모 fixture의 `node --test`)을 쓴다.
 
-    C/C++처럼 이미 make(저장소 빌드시스템)에 위임하는 언어는 개별 테스트
-    타깃팅을 일반화하기 어려워 test_command를 그대로 반환한다.
+    C/C++처럼 make(저장소 빌드시스템)에 위임하는 언어는 표준 테스트 러너가
+    없어 파일 타깃팅을 일반화할 수 없다 — 그래서 규약으로 처리한다: 선별이
+    있으면 `make ... test TESTS=<파일>`처럼 test_command에 `TESTS=` 변수를
+    덧붙인다. 저장소 Makefile의 test 타깃이 `$(TESTS)`를 존중하면 그 파일만
+    돌아(실행 기반 선별 가능), 무시하면 변수를 흘려 전체 스위트로 자연
+    폴백한다(안전 — 규약 미지원 저장소도 안 깨진다).
     """
     repo_root = Path(repo_root)
-    if spec.name not in ("javascript", "typescript"):
+    files = _test_files(selected_tests) if selected_tests else []
+
+    if spec.name in ("javascript", "typescript"):
+        if files:
+            runner = _detect_js_runner(repo_root)
+            if runner is not None:
+                return (*_JS_RUNNER_TARGETED[runner], *files)
+            # 러너를 못 알아냈지만 파일은 있음 → node --test로 그 파일만 지정.
+            return ("node", "--test", *files)
+        # 선별 없음 — 저장소가 test 스크립트를 선언했으면 npm test, 아니면 기본값.
+        pkg = repo_root / "package.json"
+        if pkg.is_file():
+            try:
+                scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
+            except (ValueError, OSError):
+                scripts = {}
+            if isinstance(scripts, dict) and scripts.get("test"):
+                return ("npm", "test")
         return spec.test_command
 
-    files = _test_files(selected_tests) if selected_tests else []
-    if files:
-        runner = _detect_js_runner(repo_root)
-        if runner is not None:
-            return (*_JS_RUNNER_TARGETED[runner], *files)
-        # 러너를 못 알아냈지만 파일은 있음 → node --test로 그 파일만 지정.
-        return ("node", "--test", *files)
+    # make 기반(build_command 보유, 예: C/C++): 선별이 있으면 TESTS 변수로 타깃팅.
+    if spec.build_command is not None and files and spec.test_command is not None:
+        return (*spec.test_command, f"TESTS={' '.join(files)}")
 
-    # 선별 없음(또는 빈 선별) — 전체 위임. 저장소가 test 스크립트를 선언했으면
-    # npm test, 아니면 정적 기본값.
-    pkg = repo_root / "package.json"
-    if pkg.is_file():
-        try:
-            scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
-        except (ValueError, OSError):
-            scripts = {}
-        if isinstance(scripts, dict) and scripts.get("test"):
-            return ("npm", "test")
     return spec.test_command
 
 

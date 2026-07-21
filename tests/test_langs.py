@@ -27,10 +27,24 @@ def test_js_falls_back_when_package_json_is_malformed(tmp_path):
     assert effective_test_command(spec, tmp_path) == ("node", "--test")
 
 
-def test_c_is_unaffected_by_resolver(tmp_path):
-    """C는 이미 make(저장소 빌드시스템)에 위임하는 구조라 그대로."""
+def test_c_full_suite_when_no_selection(tmp_path):
+    """선별 없으면 C는 전체 make test 그대로."""
     spec = detect_language("src/foo.c")
     assert effective_test_command(spec, tmp_path) == ("make", "-s", "test")
+
+
+def test_c_targets_via_tests_variable(tmp_path):
+    """선별이 있으면 make test에 TESTS=<파일> 변수를 붙여 타깃팅(규약).
+    저장소 Makefile이 $(TESTS)를 존중하면 그 파일만 돈다."""
+    spec = detect_language("src/foo.c")
+    cmd = effective_test_command(spec, tmp_path, ["tests/test_foo.c"])
+    assert cmd == ("make", "-s", "test", "TESTS=tests/test_foo.c")
+
+
+def test_cpp_targets_via_tests_variable(tmp_path):
+    spec = detect_language("src/foo.cpp")
+    cmd = effective_test_command(spec, tmp_path, ["tests/test_foo.cpp", "tests/test_bar.cpp"])
+    assert cmd == ("make", "-s", "test", "TESTS=tests/test_foo.cpp tests/test_bar.cpp")
 
 
 # --- selected_tests: targeted 러너 명령 ---
