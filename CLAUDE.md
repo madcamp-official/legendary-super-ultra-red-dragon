@@ -44,12 +44,15 @@ Claude가 공유하는 규칙과, 아직 미구현인 파트의 구현 가이드
     (깨지는지) 확인한다. 뮤테이션 엔진(`verify/mutation.py`)과 같은 메커니즘
     이라 그쪽 헬퍼를 재활용/협업하면 된다(김민재와 상의).
 
-### 의도 요약 & 에스컬레이션 — `candidates/summarize.py`, `escalate/report.py` (담당: 이서영)
+### 에스컬레이션 — `escalate/report.py` (담당: 이서영)
 
-- 에스컬레이션은 빈손으로 넘기지 않는다. **A와 B의 커밋 메시지/diff를 함께
-  반환해 각자의 의도를 나란히 보여주고**(`summarize_intent`), 후보안과 검증
+- 에스컬레이션은 빈손으로 넘기지 않는다. 후보안(base 대비 diff)과 검증/뮤테이션
   결과를 곁들여(`build_escalation_report`) 사람이 값 판단(예: `timeout 60 vs
   90`)만 하면 되도록 만든다.
+- LLM 호출은 **후보 생성(`candidates/generate.py`) 한 곳으로만 한정**한다 —
+  원래 있던 `candidates/summarize.py`(LLM 기반 의도 요약)는 팀 논의 후 제거함.
+  에스컬레이션 시 "의도 요약"은 항상 빈 값이고, 리포트는 후보 diff·검증
+  결과만으로 판단 근거를 제공한다.
 
 ### 후보 생성 — `candidates/generate.py` (담당: 이서영)
 
