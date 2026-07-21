@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -75,7 +76,8 @@ def _verify_with_lang_tests(
     """샌드박스 대체: 저장소 사본에 후보를 쓰고 언어별 전체 테스트를 돌린다."""
     start = time.monotonic()
     spec = detect_language(candidate.file_path)
-    if spec is None or spec.test_command is None:
+    is_python = spec is not None and spec.name == "python"
+    if spec is None or (spec.test_command is None and not is_python):
         return VerificationResult(
             candidate_id=candidate.id, compiled=False, tests_passed=False,
             error=f"테스트 실행 방법을 모르는 언어: {candidate.file_path}",
@@ -99,8 +101,19 @@ def _verify_with_lang_tests(
         target.write_text(candidate.content)
 
         # 컴파일 게이트: 빌드 명령이 있는 언어(C/C++ 등)는 빌드 성공을,
-        # JS/TS는 node --check 문법 검사를 컴파일 통과로 본다.
-        if spec.build_command is not None:
+        # JS/TS는 node --check, Python은 py_compile을 컴파일 통과로 본다.
+        if is_python:
+            check = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(target)],
+                capture_output=True, text=True,
+            )
+            if check.returncode != 0:
+                return VerificationResult(
+                    candidate_id=candidate.id, compiled=False, tests_passed=False,
+                    error=f"문법 오류: {check.stderr.strip()[:200]}",
+                    duration_s=time.monotonic() - start,
+                )
+        elif spec.build_command is not None:
             build = subprocess.run(
                 list(spec.build_command), cwd=repo, capture_output=True, text=True
             )
@@ -122,9 +135,14 @@ def _verify_with_lang_tests(
                     duration_s=time.monotonic() - start,
                 )
 
+        test_cmd = (
+            [sys.executable, "-m", "pytest", "-x", "-q"]
+            if is_python
+            else list(effective_test_command(spec, repo))
+        )
         try:
             result = subprocess.run(
-                list(effective_test_command(spec, repo)), cwd=repo,
+                test_cmd, cwd=repo,
                 capture_output=True, text=True, timeout=_SUITE_TIMEOUT_S,
             )
         except (subprocess.TimeoutExpired, OSError) as e:
@@ -173,6 +191,16 @@ def run_case(case: EvalCase, repo_path: str) -> dict:
         dataclasses.replace(c, file_path=case.file_path)
         for c in generate_candidates(case.base, case.ours, case.theirs, n=2, file_path=case.file_path)
     ]
+    # Python ast 뮤테이션 엔진은 relevant_tests 없이는 fail-safe로 0뮤턴트를
+    # 반환한다(트리시터 엔진만 None=전체 스위트). 케이스에 명시가 없으면
+    # 전체 pytest 파일 목록을 "전체 스위트"로 넘긴다 — 비Python은 None 유지.
+    py_relevant: list[str] | None = None
+    if case.file_path.endswith(".py"):
+        py_relevant = case.relevant_tests or sorted(
+            str(p.relative_to(repo_path))
+            for pat in ("tests/**/test_*.py", "tests/**/*_test.py")
+            for p in Path(repo_path).glob(pat)
+        )
     rec["path"] = rec.get("path", "") + ("+" if cls.is_spurious else "") + "llm-pipeline"
     rec["candidates"] = []
     verifications: list[VerificationResult] = []
@@ -184,7 +212,7 @@ def run_case(case: EvalCase, repo_path: str) -> dict:
         # 이제 mutation_ts가 그걸 effective_test_command로 넘겨 파일명으로
         # 오해(node --test full-suite → 없는 파일 → baseline 붕괴)하므로 None을 쓴다.
         m = compute_mutation_score(
-            c, relevant_tests=None, repo_path=repo_path,
+            c, relevant_tests=py_relevant, repo_path=repo_path,
             base_content=case.base, budget=12, trust_threshold=0.8,
         )
         verifications.append(v)
