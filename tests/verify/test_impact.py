@@ -121,3 +121,52 @@ def test_select_relevant_tests_falls_back_to_all_tests_for_unmapped_file(tmp_pat
     assert "tests/test_foo.py::test_foo" in result
     assert "tests/test_bar.py::test_bar" in result
     assert "tests/test_unrelated.py::test_baz" in result
+
+
+def test_select_relevant_tests_callgraph_fills_baseline_gap(tmp_path):
+    _build_sample_repo(tmp_path)
+
+    # baseline을 한 번 태워 캐시에 굳힌다 — 이 시점의 pkg/foo.py는 2줄짜리다.
+    select_relevant_tests(["pkg/foo.py"], repo_path=str(tmp_path))
+
+    # baseline 실행 "이후" pkg/foo.py에 새 함수를 추가하고, foo()가 그 새
+    # 함수를 부르도록 바꾼다. 새 함수의 줄 번호는 baseline엔 없다(진짜 gap).
+    _write(
+        tmp_path,
+        "pkg/foo.py",
+        "def foo():\n    return helper()\n\n\ndef helper():\n    return 1\n",
+    )
+
+    # helper() 본문 줄(6번)만 바뀌었다고 좁힌다 — baseline엔 이 줄이 없으니
+    # line_map.get(6)이 None이라 gap-fallback이 발동해야 한다: tree-sitter로
+    # helper() -> foo() 호출 관계를 타고 올라가, foo()의 (baseline 당시)
+    # 줄이 커버하던 테스트 집합을 채택해야 한다.
+    result = select_relevant_tests(
+        ["pkg/foo.py"], repo_path=str(tmp_path), changed_lines={"pkg/foo.py": {6}}
+    )
+
+    assert "tests/test_foo.py::test_foo" in result
+    assert "tests/test_bar.py::test_bar" in result
+    assert "tests/test_unrelated.py::test_baz" not in result
+
+
+def test_select_relevant_tests_non_python_uses_callgraph(tmp_path):
+    _write(
+        tmp_path,
+        "src/foo.js",
+        "class Foo {\n    bar() { return 1; }\n}\n"
+        "function make() {\n    const f = new Foo();\n    return f.bar();\n}\n"
+        "module.exports = { make };\n",
+    )
+    _write(
+        tmp_path,
+        "src/foo.test.js",
+        "const { make } = require('./foo');\n"
+        "test('make works', () => {\n    if (make() !== 1) throw new Error('fail');\n});\n",
+    )
+
+    result = select_relevant_tests(["src/foo.js"], repo_path=str(tmp_path))
+
+    # coverage.py 같은 도구가 없는 언어라 tree-sitter call graph로 선별한다
+    # — 개별 테스트 함수 단위로 나와야 한다(파일 단위가 아니라).
+    assert result == ["src/foo.test.js::test:make works"]
