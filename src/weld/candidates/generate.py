@@ -43,6 +43,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -239,6 +240,24 @@ def _call_llm_with_retry(do_call):
             delay = min(delay * 2, 45)
 
 
+def _sanitize_llm_text(text: str) -> str:
+    """LLM 출력에서 코드를 깨뜨리는 비인쇄/폭없는 문자를 제거한다.
+
+    일부 모델은 코드 안에 U+200B(zero-width space)·U+FEFF(BOM)·소프트하이픈
+    같은 눈에 안 보이는 문자를 섞어 넣어, 파이썬이 'SyntaxError: invalid
+    non-printable character U+200B'로 죽는다(실측: Gemini 일부 출력). 정상
+    공백(\\n \\r \\t 스페이스)은 두고, 유니코드 카테고리 Cc(제어)/Cf(포맷)만 뺀다."""
+    out = []
+    for ch in text:
+        if ch in "\n\r\t":
+            out.append(ch)
+            continue
+        if unicodedata.category(ch) in ("Cc", "Cf"):
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> str:
     """캐시 히트면 API를 아예 안 부른다. 훙크 단위 병렬 호출(ThreadPoolExecutor)에서
     여러 스레드가 동시에 들어오므로, 디스크 read-modify-write 구간만 락으로 감싸고
@@ -248,7 +267,7 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
     with _LLM_CACHE_LOCK:
         cached = _load_llm_cache().get(key)
     if cached is not None:
-        return cached
+        return _sanitize_llm_text(cached)  # 예전 캐시에 낀 비인쇄 문자도 제거
 
     def _do_call() -> str:
         if _USE_CUSTOM_LLM:
@@ -283,7 +302,7 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
                 raise
         return (response.text or "").strip()
 
-    text = _call_llm_with_retry(_do_call)
+    text = _sanitize_llm_text(_call_llm_with_retry(_do_call))
 
     with _LLM_CACHE_LOCK:
         cache = _load_llm_cache()
