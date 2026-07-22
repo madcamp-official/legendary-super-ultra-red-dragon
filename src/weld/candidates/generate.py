@@ -207,6 +207,9 @@ def _cache_key(model: str, temperature: float, prompt: str) -> str:
 _LLM_MAX_RETRIES = int(os.environ.get("WELD_LLM_MAX_RETRIES", "6"))
 _LLM_BACKOFF_BASE_S = float(os.environ.get("WELD_LLM_BACKOFF_BASE_S", "3"))
 
+# thinking_config를 거부하는 Gemini 모델(예: *-lite)을 런타임에 학습해 담아둔다.
+_GEMINI_NO_THINKING: set[str] = set()
+
 
 def _is_retryable_llm_error(exc: Exception) -> bool:
     code = getattr(exc, "status_code", None)
@@ -257,14 +260,27 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
                 temperature=temperature,
             )
             return (resp.choices[0].message.content or "").strip()
-        response = client.models.generate_content(
-            model=_DEFAULT_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=temperature,
-                thinking_config=types.ThinkingConfig(thinking_budget=0),
-            ),
-        )
+        # Gemini. thinking_config(thinking_budget=0)는 사고과정을 꺼 속도/비용을
+        # 줄이지만, 일부 모델(예: gemini-*-lite)은 이 파라미터를 400
+        # INVALID_ARGUMENT로 거부한다. 거부하는 모델은 한 번 겪고 학습해서
+        # (_GEMINI_NO_THINKING) 이후엔 안 보낸다 — 모델명 하드코딩 없이 자동 대응.
+        cfg = {"temperature": temperature}
+        if _DEFAULT_MODEL not in _GEMINI_NO_THINKING:
+            cfg["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        try:
+            response = client.models.generate_content(
+                model=_DEFAULT_MODEL, contents=prompt,
+                config=types.GenerateContentConfig(**cfg),
+            )
+        except Exception as exc:  # noqa: BLE001
+            if "thinking_config" in cfg and "INVALID_ARGUMENT" in str(exc):
+                _GEMINI_NO_THINKING.add(_DEFAULT_MODEL)
+                response = client.models.generate_content(
+                    model=_DEFAULT_MODEL, contents=prompt,
+                    config=types.GenerateContentConfig(temperature=temperature),
+                )
+            else:
+                raise
         return (response.text or "").strip()
 
     text = _call_llm_with_retry(_do_call)
