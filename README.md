@@ -10,8 +10,8 @@
 | 이름 | GitHub |
 |---|---|
 | 이재준 | dannyiscard | 
-| 김민재 ||
-|이서영||
+| 김민재 |Kminj2296|
+|이서영|sksy930|
 
 
 ## 사용 흐름 (Getting Started)
