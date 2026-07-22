@@ -37,10 +37,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import re
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -180,10 +182,46 @@ def _cache_key(model: str, temperature: float, prompt: str) -> str:
     return hashlib.sha256(f"{model}|{temperature}|{prompt}".encode("utf-8")).hexdigest()
 
 
+# 레이트리밋(429)·일시적 서버 장애(5xx)·타임아웃은 재시도하면 대개 풀린다.
+# 특히 친구 커스텀 모델은 단일 노드라 429가 잦아, 재시도가 없으면 그 호출이
+# 예외 → 파이프라인이 안전하게 에스컬레이션해버려 자동병합 기회를 놓친다
+# (오탐은 안 나지만 효능이 떨어짐). 지수 백오프로 몇 번 눌러본다.
+_LLM_MAX_RETRIES = int(os.environ.get("WELD_LLM_MAX_RETRIES", "6"))
+_LLM_BACKOFF_BASE_S = float(os.environ.get("WELD_LLM_BACKOFF_BASE_S", "3"))
+
+
+def _is_retryable_llm_error(exc: Exception) -> bool:
+    code = getattr(exc, "status_code", None)
+    if code is None:
+        resp = getattr(exc, "response", None)
+        code = getattr(resp, "status_code", None)
+    if code in (408, 409, 429, 500, 502, 503, 504):
+        return True
+    s = str(exc).lower()
+    return any(
+        m in s
+        for m in ("429", "rate limit", "ratelimit", "overloaded", "timeout",
+                  "timed out", "temporarily", "503", "502", "500", "unavailable")
+    )
+
+
+def _call_llm_with_retry(do_call):
+    """일시적 오류만 지수 백오프로 재시도. 항구적 오류(4xx 인증 등)는 즉시 올린다."""
+    delay = _LLM_BACKOFF_BASE_S
+    for attempt in range(_LLM_MAX_RETRIES):
+        try:
+            return do_call()
+        except Exception as exc:  # noqa: BLE001
+            if attempt == _LLM_MAX_RETRIES - 1 or not _is_retryable_llm_error(exc):
+                raise
+            time.sleep(delay + random.uniform(0, delay * 0.3))
+            delay = min(delay * 2, 45)
+
+
 def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> str:
     """캐시 히트면 API를 아예 안 부른다. 훙크 단위 병렬 호출(ThreadPoolExecutor)에서
     여러 스레드가 동시에 들어오므로, 디스크 read-modify-write 구간만 락으로 감싸고
-    실제 네트워크 호출은 락 밖에서 해 병렬성을 유지한다."""
+    실제 네트워크 호출은 락 밖에서 해 병렬성을 유지한다. 429/5xx는 백오프 재시도."""
     key = _cache_key(_DEFAULT_MODEL, temperature, prompt)
 
     with _LLM_CACHE_LOCK:
@@ -191,16 +229,16 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
     if cached is not None:
         return cached
 
-    if _USE_CUSTOM_LLM:
-        # OpenAI 호환 chat completions (친구 커스텀 모델 등). thinking_config는
-        # Gemini 전용이라 여기선 안 쓴다.
-        resp = client.chat.completions.create(
-            model=_DEFAULT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-    else:
+    def _do_call() -> str:
+        if _USE_CUSTOM_LLM:
+            # OpenAI 호환 chat completions (친구 커스텀 모델 등). thinking_config는
+            # Gemini 전용이라 여기선 안 쓴다.
+            resp = client.chat.completions.create(
+                model=_DEFAULT_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+            )
+            return (resp.choices[0].message.content or "").strip()
         response = client.models.generate_content(
             model=_DEFAULT_MODEL,
             contents=prompt,
@@ -209,7 +247,9 @@ def _call_llm(client: genai.Client, prompt: str, temperature: float = 0.7) -> st
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
-        text = (response.text or "").strip()
+        return (response.text or "").strip()
+
+    text = _call_llm_with_retry(_do_call)
 
     with _LLM_CACHE_LOCK:
         cache = _load_llm_cache()
