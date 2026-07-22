@@ -75,6 +75,8 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
     ours = Path(ours_file).read_text()
     theirs = Path(theirs_file).read_text()
 
+    click.echo(f"weld: {path} 충돌 검증 파이프라인 실행 중...", err=True)
+
     try:
         changed_files = [path]
         changed_lines = {path: _conflict_changed_lines(base, ours)}
@@ -95,6 +97,10 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             )
             if spurious_verification.compiled and spurious_verification.tests_passed:
                 Path(ours_file).write_text(spurious_candidate.content)
+                click.echo(
+                    f"weld: {path} — mergiraf가 가짜 충돌로 판정, 검증 통과 → 자동 병합 완료",
+                    err=True,
+                )
                 sys.exit(0)
             # mergiraf가 오판했을 수 있으니 테스트 실패 시 진짜 충돌 파이프라인으로 폴백.
 
@@ -111,6 +117,11 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
         if decision.accepted:
             accepted_candidate = next(c for c in candidates if c.id == decision.candidate_id)
             Path(ours_file).write_text(accepted_candidate.content)
+            click.echo(
+                f"weld: {path} — 후보 {accepted_candidate.id}"
+                f"({accepted_candidate.strategy}) 검증 통과 → 자동 병합 완료",
+                err=True,
+            )
             sys.exit(0)
 
         report = EscalationReport(
