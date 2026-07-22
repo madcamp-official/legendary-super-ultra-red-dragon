@@ -10,6 +10,7 @@ from __future__ import annotations
 import configparser
 import dataclasses
 import difflib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -134,6 +135,9 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 사람에게 안전하게 폴백해야 함
+        if os.environ.get("WELD_DEBUG"):
+            import traceback
+            traceback.print_exc()
         click.echo(f"weld: 검증 파이프라인이 실패해서 사람에게 폴백함: {exc}", err=True)
 
     _write_conflict_markers(ours_file, base, ours, theirs)

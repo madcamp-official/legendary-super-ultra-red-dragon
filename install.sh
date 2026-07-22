@@ -35,8 +35,10 @@ mkdir -p "$BIN"
 cat > "$BIN/weld" <<EOF
 #!/bin/sh
 # Weld 런처 (install.sh가 생성). 전역 LLM 설정을 읽고 weld.cli 실행.
+# PYTHONUTF8=1: git 머지 드라이버는 로케일이 ASCII인 환경에서 호출될 수 있어,
+# weld의 한글 리포트 출력이 UnicodeEncodeError로 죽는 것을 막는다.
 if [ -f "$CFG/env" ]; then set -a; . "$CFG/env"; set +a; fi
-exec env PYTHONPATH="$WELD_ROOT/src" "$VENV/bin/python" -m weld.cli "\$@"
+exec env PYTHONPATH="$WELD_ROOT/src" PYTHONUTF8=1 PYTHONIOENCODING=utf-8 "$VENV/bin/python" -m weld.cli "\$@"
 EOF
 chmod +x "$BIN/weld"
 
@@ -45,16 +47,17 @@ mkdir -p "$CFG"
 if [ ! -f "$CFG/env" ]; then
   cat > "$CFG/env" <<'EOF'
 # Weld가 쓰는 LLM 설정 (모든 저장소 공통). 하나만 채우면 됨.
+# 아래 주석(#)을 풀고 실제 키를 넣으세요. 안 넣으면 LLM 병합은 에스컬레이션됩니다.
 # --- 옵션 A: Google Gemini ---
-GEMINI_API_KEY=여기에_본인_키
+# GEMINI_API_KEY=paste-your-real-key-here
 GEMINI_MODEL=gemini-3.5-flash
 # --- 옵션 B: 커스텀 OpenAI 호환 모델(예: 사내 qwen). 쓰면 위 Gemini 대신 이걸 사용 ---
 # WELD_LLM_BASE_URL=http://<host>:<port>/v1
-# WELD_LLM_MODEL=<모델명>
-# WELD_LLM_API_KEY=<키>
+# WELD_LLM_MODEL=<model>
+# WELD_LLM_API_KEY=<key>
 # WELD_LLM_TIMEOUT=600
 EOF
-  echo "    → 템플릿 생성됨. $CFG/env 를 열어 API 키를 채우세요."
+  echo "    → 템플릿 생성됨. $CFG/env 를 열어 GEMINI_API_KEY 주석을 풀고 키를 넣으세요."
 else
   echo "    ✓ 기존 설정 유지"
 fi

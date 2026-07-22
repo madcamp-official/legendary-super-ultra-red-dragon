@@ -121,6 +121,22 @@ _ConflictHunk = tuple[str, str, str]  # (ours, base, theirs)
 _Segment = str | _ConflictHunk
 
 
+def _check_key_sane(api_key: str, var_name: str) -> None:
+    """API 키가 HTTP 헤더로 나가기 전에 미리 검증한다.
+
+    키에 비-ASCII가 섞이면(예: 설정 템플릿의 한글 플레이스홀더 '여기에_본인_키'를
+    안 바꾼 경우) httpx가 헤더 인코딩 단계에서 'ascii codec can't encode'로
+    죽는다 — 그 에러는 원인을 전혀 안 알려준다. 여기서 미리 친절하게 잡는다."""
+    try:
+        api_key.encode("ascii")
+    except UnicodeEncodeError:
+        raise RuntimeError(
+            f"{var_name} 값에 한글/비-ASCII 문자가 들어 있다 — 설정 파일의 "
+            f"플레이스홀더(예: '여기에_본인_키')를 실제 키로 안 바꾼 것 같다. "
+            f"~/.config/weld/env 또는 저장소 .env 를 확인하라."
+        ) from None
+
+
 def _build_client():
     """LLM 클라이언트를 만든다 — WELD_LLM_BASE_URL이 있으면 OpenAI 호환,
     없으면 Gemini. 반환 타입은 프로바이더에 따라 다르니 _call_llm이 분기한다."""
@@ -140,6 +156,7 @@ def _build_client():
         # 큰 모델(235B 등)은 긴 응답에 시간이 걸린다 — 기본 600초, WELD_LLM_TIMEOUT로 조정.
         # base_url이 http://여도 OpenAI SDK는 그 스킴을 그대로 쓴다(TLS 강제 안 함).
         timeout = float(os.environ.get("WELD_LLM_TIMEOUT", "600"))
+        _check_key_sane(api_key, "WELD_LLM_API_KEY/GEMINI_API_KEY")
         return OpenAI(base_url=_LLM_BASE_URL, api_key=api_key, timeout=timeout)
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -148,6 +165,7 @@ def _build_client():
             "GEMINI_API_KEY가 설정되지 않았다. 저장소 루트의 .env 파일에 "
             "GEMINI_API_KEY=... 를 추가하라."
         )
+    _check_key_sane(api_key, "GEMINI_API_KEY")
     return genai.Client(api_key=api_key)
 
 
