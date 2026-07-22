@@ -72,19 +72,21 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
     working tree에 되돌려 쓸 뿐) 여기서 직접 쓴다 — 안 그러면 사람이
     아무 표시 없는 "ours" 버전만 보고 충돌을 못 알아챌 수 있다.
     """
+    click.echo(f"weld: 충돌 감지됨 ({path}) — 검증 파이프라인 시작", err=True)
+
     base = Path(base_file).read_text()
     ours = Path(ours_file).read_text()
     theirs = Path(theirs_file).read_text()
 
-    click.echo(f"weld: {path} 충돌 검증 파이프라인 실행 중...", err=True)
-
     try:
         changed_files = [path]
         changed_lines = {path: _conflict_changed_lines(base, ours)}
+        click.echo(f"weld: {path} — 영향 받는 테스트 선별 중...", err=True)
         relevant_tests = select_relevant_tests(
             changed_files, repo_path=".", changed_lines=changed_lines
         )
 
+        click.echo(f"weld: {path} — 충돌 분류 중(mergiraf)...", err=True)
         classification = classify_conflict(base, ours, theirs, file_path=path)
         if classification.is_spurious:
             spurious_candidate = MergeCandidate(
@@ -93,6 +95,7 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
                 strategy="mergiraf",
                 file_path=path,
             )
+            click.echo(f"weld: {path} — 가짜 충돌로 판정, 검증 중...", err=True)
             spurious_verification = run_in_sandbox(
                 spurious_candidate, repo_path=".", tests=relevant_tests
             )
@@ -104,16 +107,26 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
                 )
                 sys.exit(0)
             # mergiraf가 오판했을 수 있으니 테스트 실패 시 진짜 충돌 파이프라인으로 폴백.
+            click.echo(
+                f"weld: {path} — 가짜 충돌 검증 실패, 진짜 충돌 파이프라인으로 전환...",
+                err=True,
+            )
 
+        click.echo(f"weld: {path} — 적절한 병합 후보 생성 중...", err=True)
         candidates = [
             dataclasses.replace(c, file_path=path)
             for c in generate_candidates(base, ours, theirs, file_path=path)
         ]
+
+        click.echo(f"weld: {path} — 병합 후보 {len(candidates)}개 테스트 중...", err=True)
         verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
+
+        click.echo(f"weld: {path} — 뮤테이션 점수 계산 중...", err=True)
         mutation_scores = compute_mutation_scores_parallel(
             candidates, relevant_tests, repo_path=".", base_content=base
         )
 
+        click.echo(f"weld: {path} — 최종 판정 중...", err=True)
         decision = decide_among(candidates, verifications, mutation_scores)
         if decision.accepted:
             accepted_candidate = next(c for c in candidates if c.id == decision.candidate_id)
