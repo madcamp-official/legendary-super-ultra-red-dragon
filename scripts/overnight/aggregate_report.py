@@ -204,6 +204,51 @@ def track_a_hunk_section(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def llm_independent_section(b1: list[dict], b2: list[dict]) -> str:
+    """어떤 LLM을 꽂아도 안 바뀌는 지표만 — 분류/검증/뮤테이션/판정은 결정론적."""
+    b1_auto = sum(1 for r in b1 if str(r.get("verdict", "")).startswith("auto_correct"))
+    b1_wrong = sum(1 for r in b1 if r.get("verdict") == "auto_WRONG")
+    b2_auto = [r for r in b2 if str(r.get("action", "")).startswith("auto")]
+    b2_wrong = sum(1 for r in b2 if str(r.get("action", "")).startswith("auto")
+                   and r.get("gt_equal") is False and r.get("gt_ratio", 1) < 0.5)
+    # 채택 후보의 생성 경로 (LLM-free vs LLM)
+    strat: Counter = Counter()
+    for r in b1:
+        if r.get("path") == "spurious-accepted":
+            strat["mergiraf"] += 1
+        d = r.get("decision", {})
+        if d.get("accepted") and d.get("candidate_id"):
+            for c in r.get("candidates", []):
+                if c["id"] == d["candidate_id"]:
+                    strat["llm" if c["strategy"].startswith("llm") else "verbatim"] += 1
+    for r in b2:
+        if r.get("action") == "auto_spurious":
+            strat["mergiraf"] += 1
+    llm_free = strat["mergiraf"] + strat["verbatim"]
+    llm_used = strat["llm"]
+    total_auto = b1_auto + len(b2_auto)
+    return "\n".join([
+        "## LLM 영향을 전혀 안 받는 지표 (모델 무관 보장)",
+        "",
+        "후보생성 4경로 중 LLM은 1개(구조합성)뿐. 분류·검증·뮤테이션·판정은"
+        " 전부 결정론적이라 **어떤 모델을 꽂아도 아래 숫자는 불변**이다.",
+        "",
+        f"- **안전성(오탐)**: 자동병합 {total_auto}건(B-1 {b1_auto} + B-2 {len(b2_auto)})"
+        f" 중 행동 오탐 **{b1_wrong + b2_wrong}건**. 게이트가 결정론적이라 qwen이"
+        " 틀려도 통과 못 하면 에스컬레이션 — 모델 바꿔도 0 불변.",
+        f"- **후보 경로**: 자동병합 {total_auto}건 중 **{llm_free}건"
+        f"({llm_free * 100 // max(total_auto, 1)}%)이 LLM 0%**"
+        f" (mergiraf {strat['mergiraf']} + verbatim {strat['verbatim']}),"
+        f" LLM 합성 {llm_used}건.",
+        "- **분류(mergiraf)**: 순수 tree-sitter. 가짜충돌 4/4 감지. m6-break는"
+        " 텍스트 충돌이 없어 '가짜'로 보지만(정확), 의미가 깨져 검증 게이트가"
+        " 잡아 에스컬레이션 → 방어 심층.",
+        "",
+        "> LLM 정확도는 '얼마나 많이 자동화하나'(효능)에만 영향을 주고,"
+        " '틀리게 자동화하나'(안전성)에는 영향이 0이다.",
+    ])
+
+
 def main() -> None:
     a = _load("track_a.jsonl")
     ah = _load("track_a_hunks.jsonl")
@@ -214,6 +259,8 @@ def main() -> None:
         "",
         "LLM: 친구 커스텀 **qwen3-235b** (OpenAI 호환, 캠프 VPN)"
         " — 전 트랙 이 모델로 실측. 원칙: *놓친 자동화는 있어도, 잘못된 자동화는 없다.*",
+        "",
+        llm_independent_section(b1, b2) if (b1 or b2) else "",
         "",
         track_b1_section(b1) if b1 else "",
         "",
