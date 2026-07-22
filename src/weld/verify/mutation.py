@@ -617,9 +617,16 @@ def compute_mutation_score(
             executed, failed = _run_tests_with_coverage(
                 worker_repo, worker_target, site.lineno, relevant_tests
             )
+            # 테스트가 실패했으면 뮤턴트가 잡힌 것(killed) — 커버리지 플래그와 무관하게
+            # 확정이다. failed인데 executed 라인 검사만으로 'uncovered'로 버리면,
+            # 커버리지 귀속이 불안정한 경우(테스트 실패 실행에서 라인 기록이 누락되는
+            # 등) 실제로 잡은 뮤턴트를 통째로 놓쳐 mutants_total=0 → 근거 없는
+            # 에스컬레이션이 된다(복잡한 다중함수 파일에서 실측한 함정).
+            if failed:
+                return "killed"
             if not executed:
                 return "uncovered"  # 테스트가 그 줄을 안 지나감 — 판단 불가, 집계 제외
-            return "killed" if failed else "survived"
+            return "survived"
 
         # 사이트를 워커 수만큼씩 배치로 병렬 실행하고, 배치마다 예산/조기종료를
         # 확인한다(순차 대비 배치 하나만큼 더 돌 수 있으나 표본이 늘어 점수가
