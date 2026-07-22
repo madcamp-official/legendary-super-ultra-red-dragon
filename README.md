@@ -7,11 +7,38 @@
 
 ## 세팅
 
+### 빠른 설치 (권장) — 처음 쓰는 사람
+
+```bash
+./install.sh
+```
+
+한 번에 다 한다: 파이썬 venv(`~/.weld-venv`, iCloud 밖) + 의존성 + mergiraf 확인
++ `weld` 명령 등록(`~/.local/bin`) + 전역 LLM 설정 템플릿(`~/.config/weld/env`).
+새 터미널을 열거나 `source ~/.zshrc` 하면 `weld` 명령을 쓸 수 있다.
+
+이후 **weld를 쓸 저장소마다 한 번**:
+
+```bash
+cd <프로젝트>
+weld install        # 그 저장소에 머지 드라이버 등록 → git merge가 자동 검증됨
+```
+
+처음 쓰는 사람용 안내는 [QUICKSTART.md](QUICKSTART.md), 실제 충돌을 만들어보는
+실습은 별도 데모 저장소의 `TUTORIAL.md` 참고.
+
+### 수동 설치 (개발/기여자용)
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+> ⚠️ `.venv`를 iCloud(Documents) 아래 두면 파일 eviction으로 읽기가 멈출 수 있고,
+> 한글 폴더명(예: `몰입캠프`) 경로면 editable install이 간헐 실패한다
+> (`ModuleNotFoundError: weld`). 둘 다 겪으면 `install.sh`(홈에 venv 생성)를
+> 쓰거나 `PYTHONPATH=src`로 우회한다.
 
 ### mergiraf 설치 (필수)
 
