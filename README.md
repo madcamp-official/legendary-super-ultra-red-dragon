@@ -5,27 +5,67 @@
 검증되지 않은 git 병합은 절대 자동으로 착지하지 못하게 막는 무결성 안전장치.
 `git merge driver`로 동작하며 UI 없음.
 
-## 세팅
+## 사용 흐름 (Getting Started)
 
-### 빠른 설치 (권장) — 처음 쓰는 사람
+weld는 **git 머지 드라이버 + 사용자 본인의 LLM 키** 조합이다. 셋업은 두
+레이어로 나뉜다 — 그리고 **API 키는 weld가 주는 게 아니라 사용자가 자기
+Gemini(또는 사내 qwen 등) 키를 가져와 넣는다.**
+
+| 레이어 | 언제 | 무엇 |
+|---|---|---|
+| **① 컴퓨터당 1회** | 이 머신에 weld 처음 깔 때 | 설치 + 내 API 키 등록 |
+| **② 저장소당 1회** | weld를 쓸 프로젝트마다 | 그 저장소에 머지 드라이버 켜기 |
+| **③ 이후** | 평소처럼 | `git merge` — 충돌 시 weld가 자동 검증 |
+
+### ① 컴퓨터당 1회 — 설치 + 키
 
 ```bash
+git clone <이 저장소> && cd weld
 ./install.sh
 ```
+`install.sh`가 다 한다: 파이썬 venv(`~/.weld-venv`, iCloud 밖) + 의존성 +
+mergiraf 확인 + `weld` 명령 등록(`~/.local/bin`) + **전역 LLM 설정 파일**
+`~/.config/weld/env` 생성. 새 터미널을 열거나 `source ~/.zshrc` 하면 `weld` 명령이 잡힌다.
 
-한 번에 다 한다: 파이썬 venv(`~/.weld-venv`, iCloud 밖) + 의존성 + mergiraf 확인
-+ `weld` 명령 등록(`~/.local/bin`) + 전역 LLM 설정 템플릿(`~/.config/weld/env`).
-새 터미널을 열거나 `source ~/.zshrc` 하면 `weld` 명령을 쓸 수 있다.
+그다음 **내 API 키를 전역 설정 한 곳에** 넣는다 (모든 저장소가 이걸 공유 —
+저장소마다 `.env` 만들 필요 없음):
+```bash
+open -e ~/.config/weld/env
+```
+```
+GEMINI_API_KEY=<본인 키>
+GEMINI_MODEL=gemini-flash-lite-latest
+```
+- **키 발급**: [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+  무료 등급은 모델·프로젝트당 하루 요청 한도가 있다(예: `gemini-3.5-flash`는 20/일).
+  많이 돌릴 거면 유료 등급 또는 가벼운 모델(`gemini-flash-lite-latest`)을 쓴다.
+- **사내/커스텀 OpenAI 호환 모델**을 쓸 거면 위 대신
+  `WELD_LLM_BASE_URL` / `WELD_LLM_MODEL` / `WELD_LLM_API_KEY` 를 넣는다(그러면 Gemini 대신 그걸 사용).
+- 키가 없거나 한도 초과여도 **안전** — LLM 호출이 실패하면 weld는 자동병합 대신
+  사람에게 에스컬레이션한다(오탐 없음).
 
-이후 **weld를 쓸 저장소마다 한 번**:
+### ② 저장소당 1회 — 드라이버 켜기
 
 ```bash
 cd <프로젝트>
-weld install        # 그 저장소에 머지 드라이버 등록 → git merge가 자동 검증됨
+weld install
 ```
+그 저장소의 `.git/config`에 "충돌 나면 weld를 불러라"를 등록하고
+`.gitattributes`(`* merge=weld`)를 만든다. **왜 저장소마다?** git 머지 드라이버
+설정은 `.git/config`에 있어 **clone에 안 따라오기** 때문 — 그 저장소를 clone한
+사람마다 한 번씩 실행해야 한다(`.gitattributes`는 커밋되어 공유됨).
 
-처음 쓰는 사람용 안내는 [QUICKSTART.md](QUICKSTART.md), 실제 충돌을 만들어보는
-실습은 별도 데모 저장소의 `TUTORIAL.md` 참고.
+### ③ 이후 — 그냥 평소처럼
+
+```bash
+git merge some-branch
+```
+충돌이 나면 weld가 자동으로 끼어든다: 분류(가짜/진짜) → LLM 후보 합성 →
+샌드박스 검증 → 뮤테이션 → 판정. 검증을 통과하면 자동병합, 아니면 익숙한
+충돌 마커를 남기고 사람에게 넘긴다. **사용자는 weld를 의식할 필요 없이 `git merge`만 하면 된다.**
+
+> 처음 쓰는 사람용 요약은 [QUICKSTART.md](QUICKSTART.md), 실제 충돌을 직접
+> 만들어보는 실습은 데모 저장소의 `TUTORIAL.md` 참고.
 
 ### 수동 설치 (개발/기여자용)
 
