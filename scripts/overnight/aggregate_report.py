@@ -157,8 +157,56 @@ def track_b2_section(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def track_a_hunk_section(rows: list[dict]) -> str:
+    ok = [r for r in rows if not r.get("error")]
+    by_lang: dict[str, list[dict]] = defaultdict(list)
+    for r in ok:
+        by_lang[r["language"]].append(r)
+    lines = [
+        "## Track A (훙크) — 정밀 측정: 충돌 영역만 잘라 노이즈 제거",
+        "",
+        "전체파일 정답에는 충돌과 무관한 동시편집이 섞인다. 그래서 diff3 충돌"
+        " 블록 ±8줄 창으로 잘라, qwen 후보와 사람 정답을 **충돌 영역만** 비교."
+        f" 대형 파일(전체파일 트랙에서 too_big로 탈락)까지 복구해 {len(rows)}건 —"
+        " 특히 C/C++ 실전 케이스가 대폭 늘었다. (ratio≥0.99 = 사실상 재현)",
+        "",
+        "| 언어 | n | exact | ratio≥0.99 | 평균 유사도 |",
+        "|---|---|---|---|---|",
+    ]
+    order = sorted(by_lang.items(), key=lambda kv: -len(kv[1]))
+    for lang, xs in order:
+        ex = sum(1 for x in xs if x["exact"])
+        hi = sum(1 for x in xs if x["best_ratio"] >= 0.99)
+        avg = sum(x["best_ratio"] for x in xs) / len(xs)
+        lines.append(
+            f"| {lang} | {len(xs)} | {ex} ({ex / len(xs):.0%}) | "
+            f"{hi} ({hi / len(xs):.0%}) | {avg:.3f} |"
+        )
+    if ok:
+        ex = sum(1 for x in ok if x["exact"])
+        hi = sum(1 for x in ok if x["best_ratio"] >= 0.99)
+        avg = sum(x["best_ratio"] for x in ok) / len(ok)
+        lines.append(
+            f"| **전체** | **{len(ok)}** | **{ex} ({ex / len(ok):.0%})** | "
+            f"**{hi} ({hi / len(ok):.0%})** | **{avg:.3f}** |"
+        )
+    synth = [x for x in ok if x.get("resolution_kind") == "synthesis"]
+    if synth:
+        hi = sum(1 for x in synth if x["best_ratio"] >= 0.99)
+        lines += [
+            "",
+            f"- **진짜 합성** {len(synth)}건: ratio≥0.99 {hi}건 ({hi / len(synth):.0%}), "
+            f"평균 {sum(x['best_ratio'] for x in synth) / len(synth):.3f}",
+            "- 정직한 해석: 바이트 단위 정확 재현은 언어별 28~47%. LLM이 항상 맞히는"
+            " 게 아니라, **틀린 후보를 검증+뮤테이션 게이트가 걸러 사람에게 넘기는**"
+            " 안전성이 이 파이프라인의 핵심.",
+        ]
+    return "\n".join(lines)
+
+
 def main() -> None:
     a = _load("track_a.jsonl")
+    ah = _load("track_a_hunks.jsonl")
     b1 = _load("track_b_seeded.jsonl")
     b2 = _load("track_b2_real.jsonl")
     parts = [
@@ -173,9 +221,12 @@ def main() -> None:
         "",
         track_a_section(a) if a else "",
         "",
+        track_a_hunk_section(ah) if ah else "",
+        "",
         "---",
-        f"산출 데이터: track_a.jsonl {len(a)}건 · track_b_seeded.jsonl {len(b1)}건"
-        f" · track_b2_real.jsonl {len(b2)}건 (모두 results/overnight-0721/)",
+        f"산출 데이터: track_a.jsonl {len(a)}건 · track_a_hunks.jsonl {len(ah)}건"
+        f" · track_b_seeded.jsonl {len(b1)}건 · track_b2_real.jsonl {len(b2)}건"
+        f" (모두 results/overnight-0721/)",
     ]
     with open(OUT, "w") as f:
         f.write("\n".join(parts) + "\n")
