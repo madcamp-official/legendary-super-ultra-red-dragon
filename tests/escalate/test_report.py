@@ -11,7 +11,9 @@ def test_build_escalation_report_handles_empty_candidates():
     assert "생성된 후보 없음" in output
 
 
-def test_build_escalation_report_includes_intent_summary():
+def test_build_escalation_report_omits_intent_summary():
+    """LLM 호출이 candidates/generate.py 한 곳으로 한정되어 intent_summary는
+    항상 빈 값이므로, 리포트에 의도 요약 섹션 자체가 나오면 안 된다."""
     report = EscalationReport(
         intent_summary="양쪽 다 로깅 함수를 수정함",
         candidates=[],
@@ -19,7 +21,8 @@ def test_build_escalation_report_includes_intent_summary():
         mutation_scores=[],
     )
     output = build_escalation_report(report)
-    assert "양쪽 다 로깅 함수를 수정함" in output
+    assert "의도 요약" not in output
+    assert "양쪽 다 로깅 함수를 수정함" not in output
 
 
 def test_build_escalation_report_shows_failing_candidate():

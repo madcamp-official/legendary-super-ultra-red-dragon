@@ -1,7 +1,9 @@
 """담당: 이서영
 
-검증에 실패해 사람에게 넘길 때, 원시 충돌 마커만 던지지 않고 의도 요약과
-후보안(및 각 후보의 검증 결과)을 함께 담은 리포트를 만든다.
+검증에 실패해 사람에게 넘길 때, 원시 충돌 마커만 던지지 않고 후보안(및
+각 후보의 검증 결과)을 함께 담은 리포트를 만든다. 의도 요약은 LLM 호출을
+후보 생성(candidates/generate.py) 한 곳으로만 한정하기로 한 팀 결정에 따라
+항상 비어 있으므로 출력하지 않는다.
 
 후보 코드는 전체 파일이 아니라 base 대비 diff로 보여준다 — MergeCandidate.
 content 계약(파일 전체, types.py 참고)은 그대로 유지하되, 사람이 읽는 화면
@@ -73,9 +75,6 @@ def build_escalation_report(report: EscalationReport, base: str = "") -> str:
     """
     lines = [
         "# Weld: 자동 병합 실패 — 사람 확인 필요",
-        "",
-        "## 의도 요약",
-        report.intent_summary or "(요약 없음)",
         "",
         "## 시도한 후보",
         "",
