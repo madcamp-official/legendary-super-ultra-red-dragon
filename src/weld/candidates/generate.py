@@ -404,7 +404,7 @@ def _dedupe_candidates(candidates: list[MergeCandidate]) -> list[MergeCandidate]
 
 
 def generate_candidates(
-    base: str, ours: str, theirs: str, n: int = 2, file_path: str | None = None
+    base: str, ours: str, theirs: str, n: int | None = None, file_path: str | None = None
 ) -> list[MergeCandidate]:
     """3-way 충돌에 대해 후보를 최대 n개 생성한다.
 
@@ -415,7 +415,14 @@ def generate_candidates(
     생성해도 결과 내용이 완전히 같아지는 경우 _dedupe_candidates가 중복을
     걸러내므로, 반환 개수가 n보다 적을 수 있다(그만큼 검증/뮤테이션 비용도
     준다).
+
+    n을 명시하지 않으면 환경변수 WELD_LLM_CANDIDATES(기본 2)를 쓴다 — 구조합성
+    후보 하나당 LLM을 1회 호출하므로, 무료 등급 등 호출 예산이 빠듯할 땐
+    WELD_LLM_CANDIDATES=1 로 두면 병합당 호출이 절반(2→1)이 된다. 대신 서로
+    다른 temperature 후보로 판정을 교차검증하는 견고성은 그만큼 줄어든다.
     """
+    if n is None:
+        n = max(1, int(os.environ.get("WELD_LLM_CANDIDATES", "2")))
     if is_value_conflict(base, ours, theirs):
         candidates = [
             MergeCandidate(id="c-0", content=ours, strategy="ours-verbatim"),
