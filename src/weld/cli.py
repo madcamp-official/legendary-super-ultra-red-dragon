@@ -10,8 +10,11 @@ from __future__ import annotations
 import configparser
 import dataclasses
 import difflib
+import itertools
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import click
@@ -26,6 +29,35 @@ from weld.verify.mutation import compute_mutation_scores_parallel
 from weld.verify.sandbox import run_candidates_parallel, run_in_sandbox
 
 MERGE_DRIVER_NAME = "weld"
+
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+@contextmanager
+def _loading():
+    """직전 상태 메시지 뒤, 다음 상태 메시지가 뜨기 전까지 스피너를 돌린다.
+
+    파이프라인 각 단계(테스트 선별/분류/후보 생성/검증/뮤테이션/판정)는
+    실제로 시간이 걸리는 동기 호출이라, 그냥 두면 화면이 멈춘 것처럼 보인다
+    — 별도 스레드로 애니메이션을 돌려야 블로킹 호출 도중에도 움직인다.
+    """
+    stop = threading.Event()
+
+    def _spin() -> None:
+        for frame in itertools.cycle(_SPINNER_FRAMES):
+            if stop.is_set():
+                break
+            click.echo(f"\r{frame} ", err=True, nl=False)
+            stop.wait(0.08)
+        click.echo("\r  \r", err=True, nl=False)
+
+    thread = threading.Thread(target=_spin, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join()
 
 
 def _conflict_changed_lines(base: str, ours: str) -> set[int]:
@@ -81,12 +113,14 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
         changed_files = [path]
         changed_lines = {path: _conflict_changed_lines(base, ours)}
         click.echo(f"weld: {path} — 영향 받는 테스트 선별 중...", err=True)
-        relevant_tests = select_relevant_tests(
-            changed_files, repo_path=".", changed_lines=changed_lines
-        )
+        with _loading():
+            relevant_tests = select_relevant_tests(
+                changed_files, repo_path=".", changed_lines=changed_lines
+            )
 
         click.echo(f"weld: {path} — 충돌 분류 중(mergiraf)...", err=True)
-        classification = classify_conflict(base, ours, theirs, file_path=path)
+        with _loading():
+            classification = classify_conflict(base, ours, theirs, file_path=path)
         if classification.is_spurious:
             spurious_candidate = MergeCandidate(
                 id="mergiraf-spurious",
@@ -95,9 +129,10 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
                 file_path=path,
             )
             click.echo(f"weld: {path} — 가짜 충돌로 판정, 검증 중...", err=True)
-            spurious_verification = run_in_sandbox(
-                spurious_candidate, repo_path=".", tests=relevant_tests
-            )
+            with _loading():
+                spurious_verification = run_in_sandbox(
+                    spurious_candidate, repo_path=".", tests=relevant_tests
+                )
             if spurious_verification.compiled and spurious_verification.tests_passed:
                 Path(ours_file).write_text(spurious_candidate.content)
                 click.echo(
@@ -112,21 +147,27 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             )
 
         click.echo(f"weld: {path} — 적절한 병합 후보 생성 중...", err=True)
-        candidates = [
-            dataclasses.replace(c, file_path=path)
-            for c in generate_candidates(base, ours, theirs, file_path=path)
-        ]
+        with _loading():
+            candidates = [
+                dataclasses.replace(c, file_path=path)
+                for c in generate_candidates(base, ours, theirs, file_path=path)
+            ]
 
         click.echo(f"weld: {path} — 병합 후보 {len(candidates)}개 테스트 중...", err=True)
-        verifications = run_candidates_parallel(candidates, repo_path=".", tests=relevant_tests)
+        with _loading():
+            verifications = run_candidates_parallel(
+                candidates, repo_path=".", tests=relevant_tests
+            )
 
         click.echo(f"weld: {path} — 뮤테이션 점수 계산 중...", err=True)
-        mutation_scores = compute_mutation_scores_parallel(
-            candidates, relevant_tests, repo_path=".", base_content=base
-        )
+        with _loading():
+            mutation_scores = compute_mutation_scores_parallel(
+                candidates, relevant_tests, repo_path=".", base_content=base
+            )
 
         click.echo(f"weld: {path} — 최종 판정 중...", err=True)
-        decision = decide_among(candidates, verifications, mutation_scores)
+        with _loading():
+            decision = decide_among(candidates, verifications, mutation_scores)
         if decision.accepted:
             accepted_candidate = next(c for c in candidates if c.id == decision.candidate_id)
             Path(ours_file).write_text(accepted_candidate.content)
@@ -143,7 +184,7 @@ def merge(base_file: str, ours_file: str, theirs_file: str, path: str) -> None:
             verifications=verifications,
             mutation_scores=mutation_scores,
         )
-        click.echo(build_escalation_report(report, base), err=True)
+        click.echo(build_escalation_report(report), err=True)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 — 어떤 실패든 사람에게 안전하게 폴백해야 함
