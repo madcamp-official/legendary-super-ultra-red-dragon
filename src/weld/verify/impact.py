@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -235,6 +236,7 @@ def _load_baseline_mapping(
 
     module_to_file = _build_module_to_file(repo_root)
 
+    any_test_context = False
     for measured in cov_data.measured_files():
         rel_path = _normalize(repo_root, measured)
         line_map: dict[int, set[TestId]] = {}
@@ -244,13 +246,24 @@ def _load_baseline_mapping(
             # 없다"(collection-time 전용 줄 등)와 "이 줄 자체를 아예 못
             # 봤다"(baseline 이후 추가된 신규 줄)를 구분해야, gap-fallback이
             # 후자에서만 발동한다(_select_python의 `tests is None` 체크).
-            line_map[lineno] = {
+            resolved_set = {
                 resolved
                 for c in contexts
                 if c and (resolved := _resolve_context(c, module_to_file)) is not None
             }
+            if resolved_set:
+                any_test_context = True
+            line_map[lineno] = resolved_set
         if line_map:
             mapping[rel_path] = line_map
+
+    # 테스트 컨텍스트가 단 하나도 없으면 baseline에서 테스트가 하나도 안 돈
+    # 것이다(예: collection error로 pytest가 수집 단계에서 중단 — import 시점
+    # 줄만 기록됨). 이 매핑을 유효한 근거로 쓰면 "이 줄엔 테스트가 없다"로
+    # 오판해 선별이 빈 목록이 된다 — baseline 실패로 취급해 전체-폴백(이후
+    # union-green이 거름)으로 보낸다.
+    if not any_test_context:
+        return {}
     return mapping
 
 
@@ -382,6 +395,113 @@ def _select_via_callgraph(
     return relevant
 
 
+# ---------------------------------------------------------------- union-green
+# "초록 main 가정" 제거: 선별된 파이썬 테스트를 병합의 양쪽 부모(HEAD=ours,
+# MERGE_HEAD=theirs) 트리에서 실제로 돌려보고, **어느 한쪽에서라도 초록인
+# 테스트만** 판정 게이트로 쓴다.
+#
+# 왜 union인가 (naive baseline-diff의 함정): "HEAD에서 빨간 테스트는 전부
+# 무시"로 하면, theirs가 가져온 기능의 테스트(ours엔 기능이 없어 HEAD에서
+# 빨간 게 정상)까지 무시된다 → theirs 기능을 빼먹은 후보가 '새로 깨진 테스트
+# 없음'으로 통과 → 잘못된 자동병합(오탐). 반면 union-green은 그 테스트가
+# MERGE_HEAD에서 초록이므로 게이트에 남아, 기능을 빼먹은 후보를 잡는다.
+# 양쪽 모두에서 빨간 테스트만이 "이 병합과 무관한 잔재 노이즈"로 제외된다
+# (실측: 데모 저장소에서 다른 시나리오의 base-빨강 테스트가 전체-폴백에
+# 딸려 들어와 모든 후보를 오염시킨 사건).
+#
+# 실행 자체가 불가능하면(git 저장소 아님, pytest 크래시 등) 신호 없음으로
+# 보고 기존 목록을 그대로 쓴다 — 기존 동작 대비 절대 덜 보수적이지 않다.
+
+_PASSED_RE = re.compile(r"^(\S+) PASSED", re.M)
+
+
+def _pytest_green_subset(tree_root: Path, tests: list[TestId]) -> set[TestId] | None:
+    """주어진 pytest 노드 ID들을 tree_root에서 실행해 통과(PASSED)한 것만 반환.
+    실행 자체가 전부 불가능하면 None(신호 없음).
+
+    파일별로 나눠 실행한다 — collection error가 나는 파일의 노드ID가 한 번의
+    실행에 섞여 있으면 pytest가 'found no collectors'로 나머지 테스트까지
+    아예 안 돌리는 함정이 있다(--continue-on-collection-errors로도 못 피함,
+    실측). 판정도 exit code가 아니라 명시적 PASSED 라인만 믿는다."""
+    by_file: dict[str, list[TestId]] = defaultdict(list)
+    for t in tests:
+        file_part = t.split("::")[0]
+        if (tree_root / file_part).exists():
+            by_file[file_part].append(t)
+    if not by_file:
+        return set()
+
+    env = os.environ.copy()
+    env[_BASELINE_ENV_FLAG] = "1"  # 이 안에서 weld가 재진입해도 baseline 재귀 금지
+    green: set[TestId] = set()
+    any_ran = False
+    for file_part, ids in by_file.items():
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-v", "--tb=no",
+                 "-p", "no:cacheprovider", *ids],
+                cwd=tree_root, capture_output=True, text=True,
+                timeout=_BASELINE_TIMEOUT_SECONDS, env=env,
+            )
+        except (subprocess.SubprocessError, OSError):
+            continue
+        any_ran = True
+        passed = set(_PASSED_RE.findall(result.stdout))
+        green.update(t for t in ids if t in passed)
+    return green if any_ran else None
+
+
+def _green_in_tree(repo_root: Path, ref: str, tests: list[TestId]) -> set[TestId] | None:
+    """ref 시점의 트리(detached worktree)에서 초록인 테스트 집합."""
+    tmp = Path(tempfile.mkdtemp(prefix="weld-green-")) / "wt"
+    added = subprocess.run(
+        ["git", "-C", str(repo_root), "worktree", "add", "--detach", str(tmp), ref],
+        capture_output=True, text=True,
+    )
+    if added.returncode != 0:
+        # git 저장소가 아니거나 worktree 불가 — HEAD면 현재 트리에서 직접 실행.
+        return _pytest_green_subset(repo_root, tests) if ref == "HEAD" else None
+    try:
+        return _pytest_green_subset(tmp, tests)
+    finally:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove", "--force", str(tmp)],
+            capture_output=True,
+        )
+
+
+def _merge_other_head(repo_root: Path) -> str | None:
+    """병합 진행 중이면 상대편(theirs) 커밋 ref, 아니면 None."""
+    r = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+        capture_output=True, text=True,
+    )
+    sha = r.stdout.strip()
+    return sha if r.returncode == 0 and sha else None
+
+
+def _filter_union_green(repo_root: Path, selected: set[TestId]) -> set[TestId]:
+    """파이썬 노드ID만 union-green으로 거른다(비파이썬 ID는 그대로 통과 —
+    그쪽은 callgraph.verify_relevant_tests가 이미 실행 기반으로 거른다)."""
+    py = {t for t in selected if "::" in t and t.split("::")[0].endswith(".py")}
+    if not py or os.environ.get(_BASELINE_ENV_FLAG):
+        return selected
+    ordered = sorted(py)
+    greens: list[set[TestId]] = []
+    ours = _green_in_tree(repo_root, "HEAD", ordered)
+    if ours is not None:
+        greens.append(ours)
+    other = _merge_other_head(repo_root)
+    if other is not None:
+        theirs = _green_in_tree(repo_root, other, ordered)
+        if theirs is not None:
+            greens.append(theirs)
+    if not greens:
+        return selected  # 신호 없음 → 기존 동작 유지
+    union: set[TestId] = set().union(*greens)
+    return (selected - py) | (py & union)
+
+
 def select_relevant_tests(
     changed_files: list[str],
     repo_path: str,
@@ -396,6 +516,11 @@ def select_relevant_tests(
     gap-fallback), 그 외는 tree-sitter call graph 1차 선별로 각각 반환한
     결과를 그대로 합친다(한 커밋에 여러 언어가 섞여 바뀌어도 각자 자기
     메커니즘으로 선별된다).
+
+    마지막에 union-green 필터를 거친다: 병합의 양쪽 부모 어디서도 통과하지
+    않는 파이썬 테스트(이 병합과 무관하게 이미 빨간 잔재)는 판정 게이트에서
+    제외한다 — "초록 main"이 아니어도 무관한 실패가 후보 검증을 오염시키지
+    않는다. 상세는 _filter_union_green 위 주석.
     """
     if not changed_files:
         return []
@@ -417,4 +542,4 @@ def select_relevant_tests(
     for lang, files in by_language.items():
         relevant |= _select_via_callgraph(repo_root, lang, files, changed_lines)
 
-    return sorted(relevant)
+    return sorted(_filter_union_green(repo_root, relevant))
