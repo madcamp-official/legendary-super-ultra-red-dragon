@@ -44,6 +44,32 @@ GEMINI_MODEL=gemini-flash-lite-latest
 - 키가 없거나 한도 초과여도 **안전** — LLM 호출이 실패하면 weld는 자동병합 대신
   사람에게 에스컬레이션한다(오탐 없음).
 
+### 어떤 모델을 쓸까 (`GEMINI_MODEL`)
+
+구조합성 품질과 호출 한도의 트레이드오프다. weld는 구조충돌 1건당 후보를 2개
+(온도 0.2/1.7) 만들어 **LLM을 2회 호출**하므로, 무료 20회면 실질 **~10병합/일**이다.
+
+| 모델 | 합성 품질 | 무료 한도 | 비고 |
+|---|---|---|---|
+| `gemini-3.5-flash` (기본) | 높음 | 낮음 (~20/일·모델·프로젝트) | 복잡한 상호작용도 잘 합성. 실측 기준 |
+| `gemini-flash-lite-latest` | 중간 | 더 관대(정확 수치는 콘솔 확인) | 빠르고 싸지만 복잡한 케이스에서 미묘한 오류 가능. weld가 `thinking_config`를 자동 생략해 호환 |
+| 커스텀 OpenAI 호환(예: 사내 qwen) | 높음 | 무제한(자체 서버) | `GEMINI_*` 대신 `WELD_LLM_BASE_URL/MODEL/API_KEY`. 사내망/VPN 필요 |
+| 유료 Gemini (billing 연결+잔액) | 높음 | 사실상 해제 | 쓴 만큼 과금 |
+
+- **무료 등급 한도는 모델·프로젝트·일 단위**다. 소진되면 429가 나고, weld는
+  안전하게 에스컬레이션한다(오탐 없음).
+- **새 프로젝트 = 별도 무료 버킷.** [AI Studio](https://aistudio.google.com/apikey)에서
+  "Create API key in **new project**"로 만들면 그 프로젝트의 새 한도가 생긴다
+  (키만 새로 만들고 같은 프로젝트면 한도를 공유하므로 소용없다).
+- **429가 "prepayment credits depleted"면** 무료 한도가 아니라 **유료(선불) 잔액 0** 이라는 뜻 —
+  모델을 바꿔도 안 되고, 결제에서 크레딧을 충전해야 한다.
+
+권장:
+- **연습·데모를 많이 돌릴 때** → `gemini-flash-lite-latest`, 또는 프로젝트를 여러 개
+  만들어 팀원이 각자 다른 키 사용
+- **발표·실사용 최고 품질** → `gemini-3.5-flash` 또는 커스텀 qwen
+- **한도 없이 마음껏** → 커스텀 qwen(VPN) 또는 유료 Gemini
+
 ### ② 저장소당 1회 — 드라이버 켜기
 
 ```bash
@@ -64,8 +90,18 @@ git merge some-branch
 샌드박스 검증 → 뮤테이션 → 판정. 검증을 통과하면 자동병합, 아니면 익숙한
 충돌 마커를 남기고 사람에게 넘긴다. **사용자는 weld를 의식할 필요 없이 `git merge`만 하면 된다.**
 
-> 처음 쓰는 사람용 요약은 [QUICKSTART.md](QUICKSTART.md), 실제 충돌을 직접
-> 만들어보는 실습은 데모 저장소의 `TUTORIAL.md` 참고.
+> 실제 충돌을 직접 만들어보는 실습은 데모 저장소의 `TUTORIAL.md` 참고.
+
+### 문제 해결
+
+| 증상 | 해결 |
+|---|---|
+| `command not found: weld` | 새 터미널을 열거나 `source ~/.zshrc` (PATH 반영) |
+| 병합이 매번 에스컬레이션 | `~/.config/weld/env`의 LLM 키/한도 확인. 값충돌 등 LLM-무관 케이스가 되는지 먼저 확인 |
+| `429 RESOURCE_EXHAUSTED` | 무료 한도 소진 → 내일 리셋 / 새 프로젝트 키 / 가벼운 모델. `prepayment depleted`면 유료 잔액 충전 |
+| `400 INVALID_ARGUMENT` (flash-lite) | weld가 자동 처리함(최신 버전). 안 되면 `git pull`로 weld 갱신 |
+| `mergiraf` 없음 | `brew install mergiraf` (install.sh가 확인·설치) |
+| venv 읽기가 멈춤 | venv를 iCloud(Documents) 밖에 — install.sh는 `~/.weld-venv`(홈)에 만든다 |
 
 ### 수동 설치 (개발/기여자용)
 
